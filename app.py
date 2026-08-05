@@ -124,7 +124,6 @@ HTML_TEMPLATE = """
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Gestão CAESB | Brisas do Lago</title>
-    <!-- Bibliotecas Mágicas para PDF e Excel direto do Navegador -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.28/jspdf.plugin.autotable.min.js"></script>
@@ -210,7 +209,7 @@ HTML_TEMPLATE = """
         </div>
         <div style="display: flex; gap: 10px; margin-top: 15px;">
             <button class="btn-green" onclick="exportarExcel()">📊 Exportar Excel</button>
-            <button class="btn-red" onclick="exportarPDF()">📄 Emitir Relatório PDF</button>
+            <button class="btn-red" onclick="exportarPDF()">📄 Emitir PDF Gerencial Resumido</button>
         </div>
     </div>
 
@@ -231,7 +230,8 @@ HTML_TEMPLATE = """
 </div>
 
 <script>
-    let dadosGlobais = []; // Guarda os dados na memória para exportar
+    let dadosGlobais = []; 
+    let resumoGlobal = {};
 
     function toggleLoading(show) { document.getElementById('loading').style.display = show ? 'flex' : 'none'; }
 
@@ -269,7 +269,8 @@ HTML_TEMPLATE = """
             
             if(res.error) return alert("Erro: " + res.error);
 
-            dadosGlobais = res.data; // Salva para o Excel e PDF
+            dadosGlobais = res.data;
+            resumoGlobal = res.resumo;
             
             // Atualiza Dashboard
             document.getElementById('lbl-consumo').innerText = res.resumo.consumo_global.toFixed(1);
@@ -329,29 +330,182 @@ HTML_TEMPLATE = """
         XLSX.writeFile(wb, "Relatorio_Faturacao_Brisas.xlsx");
     }
 
+    /* =========================================================
+       GERADOR DE PDF GERENCIAL EXECUTIVO (ESTILO PLANILHA MESTRA)
+       ========================================================= */
     function exportarPDF() {
         if(dadosGlobais.length === 0) return alert("Processe os dados primeiro!");
+        
         const { jsPDF } = window.jspdf;
-        const doc = new jsPDF('l', 'mm', 'a4'); // 'l' = Paisagem
+        const doc = new jsPDF('p', 'mm', 'a4'); // Formato A4 Retrato Executivo
         
-        doc.setFontSize(18);
-        doc.text("RELATORIO GERENCIAL - BRISAS DO LAGO", 14, 15);
-        
-        doc.setFontSize(10);
-        let date = new Date().toLocaleString();
-        doc.text("Gerado em: " + date, 14, 22);
+        const fmtMoney = (val) => "R$ " + (val || 0).toLocaleString('pt-BR', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+        const fmtNum = (val, dec=1) => (val || 0).toLocaleString('pt-BR', {minimumFractionDigits: dec, maximumFractionDigits: dec});
 
-        // Prepara dados filtrados visíveis na tabela
-        let table = document.getElementById("dataTable");
+        let valCaesbRes = parseFloat(document.getElementById('val_res').value) || 0;
+        let valCaesbCom = parseFloat(document.getElementById('val_com').value) || 0;
+
+        // Separando os dados para os resumos
+        let comerciais = dadosGlobais.filter(d => d.TIPO === 'COMERCIAL');
+        let residenciais = dadosGlobais.filter(d => d.TIPO === 'RESIDENCIAL');
+
+        let m3ComTotal = comerciais.reduce((a, b) => a + (b.CONSUMO || 0), 0);
+        let m3ResTotal = residenciais.reduce((a, b) => a + (b.CONSUMO || 0), 0);
+        let m3Global = m3ComTotal + m3ResTotal;
+
+        let totComFinal = comerciais.reduce((a, b) => a + (b.TOTAL || 0), 0);
+        let totResFinal = residenciais.reduce((a, b) => a + (b.TOTAL || 0), 0);
+
+        let precoM3Com = m3ComTotal > 0 ? (valCaesbCom / m3ComTotal) : 0;
+
+        // --- CULTURA VISUAL DO CABEÇALHO ---
+        doc.setFillColor(30, 42, 56); // Azul Escuro
+        doc.rect(0, 0, 210, 28, 'F');
+
+        doc.setTextColor(255, 255, 255);
+        doc.setFontSize(14);
+        doc.setFont("helvetica", "bold");
+        doc.text("CONDOMÍNIO BRISAS DO LAGO", 105, 12, { align: "center" });
+
+        doc.setFontSize(10);
+        doc.setFont("helvetica", "normal");
+        doc.text("DEMONSTRATIVO GERENCIAL DE RESSARCIMENTO DE DESPESAS DE ÁGUA E ESGOTO", 105, 18, { align: "center" });
+
+        doc.setFontSize(8);
+        let dataHoje = new Date().toLocaleDateString('pt-BR') + " às " + new Date().toLocaleTimeString('pt-BR');
+        doc.text("Emissão: " + dataHoje + " | Sistema de Gestão Inteligente", 105, 23, { align: "center" });
+
+        // --- SEÇÃO 1: SÍNTESE DAS FATURAS CAESB ---
+        let currentY = 35;
+        doc.setTextColor(0, 0, 0);
+        doc.setFontSize(11);
+        doc.setFont("helvetica", "bold");
+        doc.text("1. RESUMO DAS FATURAS CAESB (ENTRADA)", 14, currentY);
+
         doc.autoTable({
-            html: table,
-            startY: 30,
+            startY: currentY + 3,
+            head: [['Descrição da Fatura', 'Volume Medido (m³)', 'Valor da Fatura CAESB']],
+            body: [
+                ['Fatura CAESB - Categoria Residencial (Global)', fmtNum(m3ResTotal) + " m³", fmtMoney(valCaesbRes)],
+                ['Fatura CAESB - Categoria Comercial (Global)', fmtNum(m3ComTotal) + " m³", fmtMoney(valCaesbCom)],
+                ['TOTAL CONDOMÍANIO', fmtNum(m3Global) + " m³", fmtMoney(valCaesbRes + valCaesbCom)]
+            ],
             theme: 'grid',
-            headStyles: { fillColor: [52, 73, 94] },
-            styles: { fontSize: 8, cellPadding: 2 }
+            headStyles: { fillColor: [41, 128, 185], textColor: [255, 255, 255], fontStyle: 'bold', halign: 'center' },
+            bodyStyles: { fontStyle: 'bold' },
+            columnStyles: { 0: { cellWidth: 100 }, 1: { halign: 'center' }, 2: { halign: 'right' } }
         });
+
+        // --- SEÇÃO 2: QUADRO COMPARATIVO POR CATEGORIA ---
+        currentY = doc.lastAutoTable.finalY + 10;
+        doc.setFontSize(11);
+        doc.setFont("helvetica", "bold");
+        doc.text("2. CONSOLIDAÇÃO DE ARRECADAÇÃO POR CATEGORIA", 14, currentY);
+
+        doc.autoTable({
+            startY: currentY + 3,
+            head: [['Categoria', 'Qtd Medidores', 'Consumo (m³)', 'Arrecadação Base', 'Rateio Déficit', 'Total a Cobrar']],
+            body: [
+                ['Residencial', residenciais.length, fmtNum(m3ResTotal) + " m³", fmtMoney(resumoGlobal.arr_res), fmtMoney(resumoGlobal.deficit), fmtMoney(totResFinal)],
+                ['Comercial', comerciais.length, fmtNum(m3ComTotal) + " m³", fmtMoney(resumoGlobal.arr_com), "R$ 0,00", fmtMoney(totComFinal)],
+                ['TOTAL GERAL', dadosGlobais.length, fmtNum(m3Global) + " m³", fmtMoney(resumoGlobal.arr_res + resumoGlobal.arr_com), fmtMoney(resumoGlobal.deficit), fmtMoney(totResFinal + totComFinal)]
+            ],
+            theme: 'grid',
+            headStyles: { fillColor: [52, 73, 94], textColor: [255, 255, 255], fontStyle: 'bold', halign: 'center' },
+            columnStyles: { 0: { fontStyle: 'bold' }, 1: { halign: 'center' }, 2: { halign: 'center' }, 3: { halign: 'right' }, 4: { halign: 'right' }, 5: { halign: 'right', fontStyle: 'bold' } }
+        });
+
+        // --- SEÇÃO 3: DEMONSTRATIVO DETALHADO DO COMERCIAL (IGUAL DA FOTO) ---
+        currentY = doc.lastAutoTable.finalY + 10;
+        doc.setFontSize(11);
+        doc.setFont("helvetica", "bold");
+        doc.text("3. DETALHAMENTO INDIVIDUAL - CATEGORIA COMERCIAL", 14, currentY);
         
-        doc.save("Relatorio_Gerencial_Brisas.pdf");
+        doc.setFontSize(8);
+        doc.setFont("helvetica", "italic");
+        doc.text("(*) Valor do m³ Comercial apurado: " + fmtMoney(precoM3Com) + " / m³  (Fatura Comercial ÷ Total m³ Comercial)", 14, currentY + 4);
+
+        let bodyCom = comerciais.map(c => [
+            c.UNIDADE,
+            c.MEDIDOR_VISUAL,
+            fmtNum(c.L_ANTERIOR, 0),
+            fmtNum(c.VAL_ATU, 0),
+            fmtNum(c.CONSUMO, 3) + " m³",
+            fmtMoney(c.V_AGUA),
+            fmtMoney(c.TAXA),
+            fmtMoney(c.TOTAL)
+        ]);
+
+        doc.autoTable({
+            startY: currentY + 7,
+            head: [['Estabelecimento / Unidade', 'Medidor', 'L. Anterior', 'L. Atual', 'Consumo', 'Tarifa Variável', 'Tx. Leitura', 'TOTAL (R$)']],
+            body: bodyCom,
+            theme: 'striped',
+            headStyles: { fillColor: [211, 84, 0], textColor: [255, 255, 255], fontStyle: 'bold', halign: 'center' },
+            columnStyles: { 
+                0: { fontStyle: 'bold' }, 
+                1: { halign: 'center' }, 
+                2: { halign: 'center' }, 
+                3: { halign: 'center' }, 
+                4: { halign: 'center', fontStyle: 'bold' }, 
+                5: { halign: 'right' }, 
+                6: { halign: 'right' }, 
+                7: { halign: 'right', fontStyle: 'bold' } 
+            }
+        });
+
+        // --- SEÇÃO 4: RESUMO RESIDENCIAL & RATEIO ---
+        currentY = doc.lastAutoTable.finalY + 8;
+        
+        // Verifica se precisa de nova página para não cortar as assinaturas
+        if (currentY > 230) {
+            doc.addPage();
+            currentY = 20;
+        }
+
+        doc.setFontSize(11);
+        doc.setFont("helvetica", "bold");
+        doc.text("4. BALANÇO DE COBERTURA CAESB RESIDENCIAL", 14, currentY);
+
+        doc.autoTable({
+            startY: currentY + 3,
+            head: [['Indicador de Cobertura', 'Valor (R$)']],
+            body: [
+                ['A - Fatura Residencial Cobrada pela CAESB', fmtMoney(valCaesbRes)],
+                ['B - Arrecadação Base de Consumo + Taxas Fixas (Residencial)', fmtMoney(resumoGlobal.arr_res)],
+                ['C - Déficit de Arrecadação a Ratear (A - B)', fmtMoney(resumoGlobal.deficit)],
+                ['D - Forma de Rateio Aplicada', 'Dividido por Fração Ideal entre os condôminos']
+            ],
+            theme: 'grid',
+            headStyles: { fillColor: [41, 128, 185], textColor: [255, 255, 255], fontStyle: 'bold' },
+            columnStyles: { 0: { cellWidth: 130, fontStyle: 'bold' }, 1: { halign: 'right', fontStyle: 'bold' } }
+        });
+
+        // --- BLOCO DE ASSINATURAS ---
+        currentY = doc.lastAutoTable.finalY + 25;
+        if (currentY > 250) {
+            doc.addPage();
+            currentY = 40;
+        }
+
+        doc.setLineWidth(0.5);
+        doc.setDrawColor(100, 100, 100);
+
+        // Linhas de Assinatura
+        doc.line(20, currentY, 80, currentY);
+        doc.line(130, currentY, 190, currentY);
+
+        doc.setFontSize(8);
+        doc.setFont("helvetica", "bold");
+        doc.text("ADMINISTRAÇÃO / GESTÃO", 50, currentY + 4, { align: "center" });
+        doc.text("SÍNDICO(A) / CONSELHO FISCAL", 160, currentY + 4, { align: "center" });
+
+        doc.setFont("helvetica", "normal");
+        doc.text("JP Soluções & Faturamento", 50, currentY + 8, { align: "center" });
+        doc.text("Condomínio Brisas do Lago", 160, currentY + 8, { align: "center" });
+
+        // Salva o PDF
+        doc.save("Demonstrativo_Gerencial_Brisas_do_Lago.pdf");
     }
 </script>
 </body>
@@ -447,8 +601,8 @@ def processar():
         # MATEMÁTICA RESIDENCIAL OFICIAL
         # ==========================================
         primeiros_hidros = mask_res & ~df.duplicated(subset=['UNIDADE'])
-        df.loc[primeiros_hidros, 'FIXA_AGUA'] = 29.34
-        df.loc[primeiros_hidros, 'FIXA_ESGOTO'] = 29.34
+        df.loc[primeiros_hidros, 'FIXA_AGUA'] = 11.18
+        df.loc[primeiros_hidros, 'FIXA_ESGOTO'] = 11.18
         df.loc[mask_res, 'V_AGUA'] = df.loc[mask_res, 'CONSUMO'].apply(MotorFaturamento.calcular_caesb_cascata)
         df.loc[mask_res, 'V_ESGOTO'] = df.loc[mask_res, 'V_AGUA']
         df.loc[mask_res, 'SUBTOTAL'] = df['FIXA_AGUA'] + df['FIXA_ESGOTO'] + df['V_AGUA'] + df['V_ESGOTO']
@@ -482,6 +636,5 @@ def processar():
         return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
-    # Ligação direta para rodar no Railway ou Local
     port = int(os.getenv("PORT", 5000))
     app.run(debug=False, port=port, host='0.0.0.0')
