@@ -1,9 +1,9 @@
 Flask
 Flask-SQLAlchemy
-psycopg2-binary
 pandas
 openpyxl
 Werkzeug
 lxml
 html5lib
 gunicorn
+psycopg[binary]
