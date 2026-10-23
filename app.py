@@ -22,15 +22,16 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 db = SQLAlchemy(app)
 
-# --- MODELOS DO BANCO DE DADOS ---
-class MedidorBaseV3(db.Model):
-    __tablename__ = 'medidor_base_v3'
+# --- MODELOS DO BANCO DE DADOS (BASE FIXA PERMANENTE) ---
+class MedidorBaseV4(db.Model):
+    __tablename__ = 'medidor_base_v4'
     id = db.Column(db.Integer, primary_key=True)
     ordem = db.Column(db.Integer, default=0)
     bloco = db.Column(db.String(20), default="")
     andar = db.Column(db.String(20), default="")
-    unidade = db.Column(db.String(100))          # Nome agrupador (ex: A - S1 - 001, KITCLEAN)
-    unidade_raw = db.Column(db.String(100))      # Nome original (ex: KITCLEAN 1)
+    unidade = db.Column(db.String(100))          # Ex: A - S1 - 001, KITCLEAN
+    unidade_curta = db.Column(db.String(50))     # Ex: 001, 101
+    unidade_raw = db.Column(db.String(100))      # Ex: KITCLEAN 1
     tipo = db.Column(db.String(50))              # RESIDENCIAL, EMPORIO, COMERCIAL, COMERCIAL_OMO, AREA_COMUM, SEM_MEDIDOR
     hidrometro = db.Column(db.String(100), default="")
     medidor_visual = db.Column(db.String(100))
@@ -40,14 +41,15 @@ class MedidorBaseV3(db.Model):
     l_anterior = db.Column(db.Float, default=0.0)
     data_anterior = db.Column(db.String(50), default="04/09/2026")
 
-class EstadoCalculoV3(db.Model):
-    __tablename__ = 'estado_calculo_v3'
+class EstadoCalculoV4(db.Model):
+    __tablename__ = 'estado_calculo_v4'
     id = db.Column(db.Integer, primary_key=True)
-    chave = db.Column(db.String(50), unique=True) # 'mizar' ou 'walkby'
+    chave = db.Column(db.String(50), unique=True) # 'MIZAR' ou 'WALKBY'
     dados_json = db.Column(db.Text)
 
 with app.app_context():
     db.create_all()
+
 
 # --- MOTOR MATEMÁTICO E REGRAS DE NEGÓCIO BRISAS DO LAGO ---
 class MotorFaturamento:
@@ -64,34 +66,50 @@ class MotorFaturamento:
         return ''.join(c for c in unicodedata.normalize('NFKD', u) if not unicodedata.combining(c))
 
     @staticmethod
-    def normalizar_unidade_grupo(unidade_raw, bloco="", andar=""):
-        u_clean = MotorFaturamento.remover_acentos(unidade_raw)
+    def extrair_bloco_andar_unid(texto_local, bloco_in="", andar_in=""):
+        u_clean = MotorFaturamento.remover_acentos(texto_local)
+        b = str(bloco_in).strip() if bloco_in and str(bloco_in).strip() not in ['-', 'NAN', 'NONE'] else ""
+        a = str(andar_in).strip() if andar_in and str(andar_in).strip() not in ['-', 'NAN', 'NONE'] else ""
+
         if 'KITCLEAN' in u_clean or 'KIT CLEAN' in u_clean:
-            return 'KITCLEAN'
+            return ("", "", "KITCLEAN", "KITCLEAN")
         if 'BLUMA' in u_clean or 'SALAO BELEZA' in u_clean:
-            return 'SALÃO BELEZA BLUMA'
+            return ("", "", "SALÃO BELEZA BLUMA", "SALÃO BELEZA BLUMA")
         if 'LAVANDERIA OMO' in u_clean:
-            return 'LAVANDERIA OMO'
+            return ("", "", "LAVANDERIA OMO", "LAVANDERIA OMO")
         if 'EMPORIO' in u_clean:
-            return 'EMPÓRIO'
+            return ("", "", "EMPÓRIO", "EMPÓRIO")
         if 'RESTAURANTE' in u_clean:
-            return 'RESTAURANTE'
+            return ("", "", "RESTAURANTE", "RESTAURANTE")
         if 'CYBER' in u_clean:
-            return 'CYBER CAFÉ'
-        if bloco and andar and re.match(r'^\d+$', u_clean):
-            return f"{bloco.strip()} - {andar.strip()} - {u_clean.zfill(3)}"
-        # Padroniza A - 101 para A - 1º - 101 se vier do TXT
-        m = re.match(r'^([A-E])\s*-\s*([123])\d{2}$', u_clean)
-        if m:
-            num = u_clean.split('-')[-1].strip()
-            return f"{m.group(1)} - {m.group(2)}º - {num}"
-        return str(unidade_raw).strip()
+            return ("", "", "CYBER CAFÉ", "CYBER CAFÉ")
+
+        if b and a and re.match(r'^\d+$', u_clean):
+            u_num = u_clean.zfill(3)
+            return (b, a, f"{b} - {a} - {u_num}", u_num)
+
+        partes = [p.strip() for p in u_clean.split('-') if p.strip()]
+        if len(partes) == 3 and partes[0] in ['A', 'B', 'C', 'D', 'E']:
+            bloco = partes[0]
+            andar = partes[1]
+            if andar in ['1', '2', '3', '1O', '2O', '3O']:
+                andar = f"{andar[0]}º"
+            unid_num = partes[2].zfill(3) if partes[2].isdigit() else partes[2]
+            return (bloco, andar, f"{bloco} - {andar} - {unid_num}", unid_num)
+
+        if len(partes) == 2 and partes[0] in ['A', 'B', 'C', 'D', 'E'] and partes[1].isdigit():
+            bloco = partes[0]
+            unid_num = partes[1].zfill(3)
+            andar = f"{unid_num[0]}º" if unid_num[0] in ['1', '2', '3'] else "T"
+            return (bloco, andar, f"{bloco} - {andar} - {unid_num}", unid_num)
+
+        return (b, a, str(texto_local).strip(), str(texto_local).strip())
 
     @staticmethod
     def classificar_tipo(unidade_raw, medidor_str="", ordem=0):
         u = MotorFaturamento.remover_acentos(unidade_raw)
         med = str(medidor_str).strip()
-        if med == '-' or '251' in u and ('B - 2' in u or 'B-2' in u):
+        if med == '-' or ('251' in u and ('B - 2' in u or 'B-2' in u or u == '251')):
             return 'SEM_MEDIDOR'
         if 'EMPORIO' in u:
             return 'EMPORIO'
@@ -149,26 +167,87 @@ class MotorFaturamento:
         return re.sub(r'[^A-Z0-9_]', '', s)
 
     @staticmethod
+    def extrair_dados_conta_caesb_texto(texto_bruto):
+        t = str(texto_bruto)
+        t_clean = re.sub(r'\s+', ' ', t)
+
+        out = {
+            'data_ant': '', 'leitura_ant': 0,
+            'data_atu': '', 'leitura_atu': 0,
+            'volume_m3': 0,
+            'fixa_agua': 0.0, 'fixa_esgoto': 0.0,
+            'var_agua': 0.0, 'var_esgoto': 0.0,
+            'total_fatura': 0.0,
+            'categoria': 'RESIDENCIAL'
+        }
+
+        if 'COMERCIAL' in t_clean.upper():
+            out['categoria'] = 'COMERCIAL'
+
+        pares_data_leit = re.findall(r'(\d{2}/\d{2}/\d{4})\s+(\d{3,7})', t_clean)
+        pares_validos = [p for p in pares_data_leit if not p[0].endswith(('2019', '2020', '2021', '2022'))]
+        if len(pares_validos) >= 2:
+            out['data_ant'] = pares_validos[0][0]
+            out['leitura_ant'] = int(pares_validos[0][1])
+            out['data_atu'] = pares_validos[1][0]
+            out['leitura_atu'] = int(pares_validos[1][1])
+            if out['leitura_atu'] >= out['leitura_ant']:
+                out['volume_m3'] = out['leitura_atu'] - out['leitura_ant']
+
+        if out['volume_m3'] == 0:
+            m_vol = re.search(r'(?:VOLUME MEDIDO|CONSUMO FATURADO).*?(\d{2,6})', t_clean, re.IGNORECASE)
+            if m_vol:
+                out['volume_m3'] = int(m_vol.group(1))
+
+        m_fa = re.search(r'TARIFA\s+FIXA\s+DE\s+AGUA[^\d]*([\d\.]*,\d{2})', t_clean, re.IGNORECASE)
+        if m_fa: out['fixa_agua'] = MotorFaturamento.limpar_num(m_fa.group(1))
+
+        m_fe = re.search(r'TARIFA\s+FIXA\s+DE\s+ESGOTO[^\d]*([\d\.]*,\d{2})', t_clean, re.IGNORECASE)
+        if m_fe: out['fixa_esgoto'] = MotorFaturamento.limpar_num(m_fe.group(1))
+
+        m_va = re.search(r'TARIFA\s+VARIAVEL\s+DE\s+AGUA[^\d]*([\d\.]*,\d{2})', t_clean, re.IGNORECASE)
+        if m_va: out['var_agua'] = MotorFaturamento.limpar_num(m_va.group(1))
+
+        m_ve = re.search(r'TARIFA\s+VARIAVEL\s+DE\s+ESGOTO[^\d]*([\d\.]*,\d{2})', t_clean, re.IGNORECASE)
+        if m_ve: out['var_esgoto'] = MotorFaturamento.limpar_num(m_ve.group(1))
+
+        if out['fixa_agua'] > 0 and out['fixa_esgoto'] == 0:
+            out['fixa_esgoto'] = out['fixa_agua']
+        if out['var_agua'] > 0 and out['var_esgoto'] == 0:
+            out['var_esgoto'] = out['var_agua']
+
+        soma_tarifas = round(out['fixa_agua'] + out['fixa_esgoto'] + out['var_agua'] + out['var_esgoto'], 2)
+
+        m_tot = re.search(r'TOTAL\s+A\s+PAGAR.*?([\d\.]+\.\d{3},\d{2}|[\d\.]+,\d{2})', t_clean, re.IGNORECASE)
+        if m_tot:
+            out['total_fatura'] = MotorFaturamento.limpar_num(m_tot.group(1))
+
+        if soma_tarifas > 0 and (out['total_fatura'] == 0 or abs(out['total_fatura'] - soma_tarifas) > 10):
+            out['total_fatura'] = soma_tarifas
+
+        return out
+
+    @staticmethod
     def ler_planilha_ou_txt(file_bytes, filename):
         fname = filename.lower()
         if fname.endswith(('.xlsx', '.xls')):
             xls = pd.ExcelFile(io.BytesIO(file_bytes))
-            # Caso 1: Planilha Oficial com aba COBRANÇA (WALK-BY ou MIZAR oficial)
-            aba_cob = next((s for s in xls.sheet_names if 'COBRAN' in MotorFaturamento.remover_acentos(s) and 'COMERCIAL' not in MotorFaturamento.remover_acentos(s) and 'MODELO' not in MotorFaturamento.remover_acentos(s)), None)
+            aba_cob = next((s for s in xls.sheet_names if 'COBRAN' in MotorFaturamento.remover_acentos(s) and 'COMERCIAL' not in MotorFaturamento.remover_acentos(s) and 'MODELO' not in MotorFaturamento.remover_acentos(s) and 'WALK' not in MotorFaturamento.remover_acentos(s) and 'MIZAR' not in MotorFaturamento.remover_acentos(s)), None)
             if aba_cob:
                 df_raw = pd.read_excel(xls, sheet_name=aba_cob, header=None)
                 if len(df_raw) > 100 and df_raw.shape[1] >= 21:
-                    return {'tipo_arquivo': 'PLANILHA_MESTRA_COBRANCA', 'df': df_raw}
-            # Caso 2: Planilha Consolidada com walk-by unds e walk-by cobrança
-            aba_unds = next((s for s in xls.sheet_names if 'UNDS' in MotorFaturamento.remover_acentos(s)), None)
+                    return {'tipo_arquivo': 'PLANILHA_6ABAS_COBRANCA', 'df': df_raw}
+
+            aba_unds = next((s for s in xls.sheet_names if 'WALK' in MotorFaturamento.remover_acentos(s) and 'UNDS' in MotorFaturamento.remover_acentos(s)), None)
+            if not aba_unds:
+                aba_unds = next((s for s in xls.sheet_names if 'UNDS' in MotorFaturamento.remover_acentos(s)), None)
             if aba_unds:
                 df_u = pd.read_excel(xls, sheet_name=aba_unds, header=None)
-                return {'tipo_arquivo': 'PLANILHA_UNDS', 'df': df_u}
-            # Caso 3: Excel comum (ex: brisas.xlsx)
+                return {'tipo_arquivo': 'PLANILHA_9ABAS_UNDS', 'df': df_u}
+
             df = pd.read_excel(xls, dtype=str)
             return {'tipo_arquivo': 'TABELA_SIMPLES', 'df': df}
 
-        # Leitura de arquivos de texto / CSV / TSV (Walkby.txt ou Mizar.csv)
         texto = ""
         for enc in ['utf-8-sig', 'utf-8', 'latin1', 'cp1252', 'utf-16']:
             try:
@@ -194,31 +273,152 @@ class MotorFaturamento:
         return {'tipo_arquivo': 'TABELA_SIMPLES', 'df': df}
 
     @staticmethod
-    def executar_fechamento(df_mes, modo_leitura, val_caesb_res, val_caesb_com, m3_caesb_res=5248, m3_caesb_com=162):
-        medidores_db = MedidorBaseV3.query.order_by(MedidorBaseV3.ordem, MedidorBaseV3.id).all()
-        if not medidores_db:
-            raise ValueError("Dicionário Base vazio! Carregue o Passo 1 primeiro.")
+    def importar_ou_atualizar_base_fixa(info):
+        """Popula ou atualiza permanentemente a Base Fixa no banco de dados"""
+        tipo_arq = info['tipo_arquivo']
+        df = info['df']
 
-        df_cad = pd.DataFrame([{
-            'ORDEM': m.ordem, 'BLOCO': m.bloco, 'ANDAR': m.andar,
-            'UNIDADE': m.unidade, 'UNIDADE_RAW': m.unidade_raw, 'TIPO': m.tipo,
-            'HIDROMETRO': m.hidrometro, 'MEDIDOR_VISUAL': m.medidor_visual,
-            'MEDIDOR_DNA': m.medidor_dna, 'FRACAO': m.fracao,
-            'TAXA_BASE': m.taxa, 'L_ANTERIOR_BASE': m.l_anterior,
-            'DATA_ANT_BASE': m.data_anterior
-        } for m in medidores_db])
+        MedidorBaseV4.query.delete()
+        adicionados = 0
+        tem_251 = False
 
-        # Identifica colunas no arquivo enviado (Walkby ou Mizar)
+        if tipo_arq in ['PLANILHA_6ABAS_COBRANCA', 'PLANILHA_9ABAS_UNDS']:
+            start_row = 56 if tipo_arq == 'PLANILHA_6ABAS_COBRANCA' else 6
+            for idx in range(start_row, len(df)):
+                row = df.iloc[idx]
+                bloco = str(row[0]).strip() if pd.notna(row[0]) and str(row[0]).strip() not in ['nan', 'None'] else ""
+                andar = str(row[1]).strip() if pd.notna(row[1]) and str(row[1]).strip() not in ['nan', 'None'] else ""
+                unid_col = str(row[2]).strip() if pd.notna(row[2]) and str(row[2]).strip() not in ['nan', 'None'] else ""
+                hidro = str(row[3]).strip() if pd.notna(row[3]) and str(row[3]).strip() not in ['nan', 'None'] else ""
+                med_vis = str(row[4]).strip().split('.')[0] if pd.notna(row[4]) and str(row[4]).strip() not in ['nan', 'None'] else ""
+
+                if not unid_col or unid_col.upper() in ['NAN', 'NONE', 'UNIDADE', 'TOTAL']:
+                    continue
+
+                dna = MotorFaturamento.limpar_id_medidor(med_vis)
+                b_ext, a_ext, unid_grupo, unid_curta = MotorFaturamento.extrair_bloco_andar_unid(unid_col, bloco, andar)
+                ordem_num = adicionados + 1
+                tipo_unid = MotorFaturamento.classificar_tipo(unid_grupo, med_vis, ordem_num)
+
+                if tipo_unid == 'SEM_MEDIDOR':
+                    tem_251 = True
+                    dna = f"SEM_MED_251_{ordem_num}"
+                    taxa_val = 0.0
+                else:
+                    if not dna or dna == '-': continue
+                    taxa_val = 7.90
+
+                if MedidorBaseV4.query.filter_by(medidor_dna=dna).first():
+                    continue
+
+                dt_ant = str(row[5]).strip().split(' ')[0] if pd.notna(row[5]) else "04/09/2026"
+                l_ant = MotorFaturamento.limpar_num(row[6], 0.0)
+
+                if tipo_arq == 'PLANILHA_6ABAS_COBRANCA':
+                    frac = MotorFaturamento.limpar_num(row[20], 0.0)
+                else:
+                    rat_rs = MotorFaturamento.limpar_num(row[15], 0.0)
+                    frac = (rat_rs / 9461.26) if rat_rs > 0 else 0.0
+
+                db.session.add(MedidorBaseV4(
+                    ordem=ordem_num, bloco=b_ext, andar=a_ext,
+                    unidade=unid_grupo, unidade_curta=unid_curta, unidade_raw=unid_col, tipo=tipo_unid,
+                    hidrometro=hidro, medidor_visual=med_vis, medidor_dna=dna,
+                    fracao=frac, taxa=taxa_val, l_anterior=l_ant, data_anterior=dt_ant
+                ))
+                adicionados += 1
+        else:
+            df_copy = df.copy()
+            df_copy.columns = [MotorFaturamento.limpa_nome_coluna(c) for c in df_copy.columns]
+            col_uni = next((c for c in df_copy.columns if 'LOCAL' in c or 'UNIDADE' in c), None)
+            col_med = next((c for c in df_copy.columns if 'MEDIDOR' in c), None)
+            col_hid = next((c for c in df_copy.columns if c in ['TIPO', 'DESCRICAO', 'HIDROMETRO'] or 'HIDRO' in c), None)
+            col_ant = next((c for c in df_copy.columns if 'ANTIGO' in c or 'ANTERIOR' in c), None)
+            if not col_ant:
+                col_ant = next((c for c in df_copy.columns if 'INDICE' in c or 'LEITURA' in c), None)
+
+            if not col_uni or not col_med:
+                raise ValueError("Colunas de Localização/Unidade e Medidor não encontradas.")
+
+            for idx, r in df_copy.iterrows():
+                unid_raw = str(r[col_uni]).strip()
+                med_vis = str(r[col_med]).strip().split('.')[0]
+                dna = MotorFaturamento.limpar_id_medidor(med_vis)
+                if not dna or dna == '-': continue
+                if MedidorBaseV4.query.filter_by(medidor_dna=dna).first(): continue
+
+                adicionados += 1
+                b_ext, a_ext, unid_grupo, unid_curta = MotorFaturamento.extrair_bloco_andar_unid(unid_raw)
+                tipo_unid = MotorFaturamento.classificar_tipo(unid_grupo, med_vis, adicionados)
+                l_ant = MotorFaturamento.limpar_num(r[col_ant], 0.0) if col_ant else 0.0
+                hidro = str(r[col_hid]).strip() if col_hid and pd.notna(r[col_hid]) else ""
+
+                frac_default = 0.002411 if tipo_unid == 'EMPORIO' else (0.994838 / 749.0 if tipo_unid == 'RESIDENCIAL' else 0.0)
+
+                db.session.add(MedidorBaseV4(
+                    ordem=adicionados, bloco=b_ext, andar=a_ext,
+                    unidade=unid_grupo, unidade_curta=unid_curta, unidade_raw=unid_raw, tipo=tipo_unid,
+                    hidrometro=hidro, medidor_visual=med_vis, medidor_dna=dna,
+                    fracao=frac_default, taxa=7.90, l_anterior=l_ant
+                ))
+
+        if not tem_251:
+            db.session.add(MedidorBaseV4(
+                ordem=569, bloco="B", andar="2º",
+                unidade="B - 2º - 251", unidade_curta="251", unidade_raw="251", tipo="SEM_MEDIDOR",
+                hidrometro="-", medidor_visual="-", medidor_dna="SEM_MED_251_1",
+                fracao=0.002751, taxa=0.0, l_anterior=0.0, data_anterior="-"
+            ))
+            adicionados += 1
+
+        db.session.commit()
+        return adicionados
+
+    @staticmethod
+    def executar_fechamento(info_arq, modo_leitura, dados_caesb):
+        val_caesb_res = float(dados_caesb.get('val_res', 62562.80))
+        val_caesb_com = float(dados_caesb.get('val_com', 6452.54))
+        m3_caesb_res = float(dados_caesb.get('m3_res', 5248))
+        m3_caesb_com = float(dados_caesb.get('m3_com', 162))
+
+        # Se o usuário enviou diretamente a Planilha Oficial Completa no botão de processar, ou se a Base Fixa ainda estiver vazia, auto-inicializa a Base Fixa!
+        medidores_count = MedidorBaseV4.query.count()
+        if medidores_count == 0 or info_arq['tipo_arquivo'] in ['PLANILHA_6ABAS_COBRANCA', 'PLANILHA_9ABAS_UNDS']:
+            MotorFaturamento.importar_ou_atualizar_base_fixa(info_arq)
+
+        medidores_db = MedidorBaseV4.query.order_by(MedidorBaseV4.ordem, MedidorBaseV4.id).all()
+
+        # Se o arquivo enviado foi a planilha oficial completa (6 ou 9 abas), converte as linhas para df_mes padrão
+        if info_arq['tipo_arquivo'] in ['PLANILHA_6ABAS_COBRANCA', 'PLANILHA_9ABAS_UNDS']:
+            raw_df = info_arq['df']
+            start_r = 56 if info_arq['tipo_arquivo'] == 'PLANILHA_6ABAS_COBRANCA' else 6
+            rows_extracted = []
+            for idx in range(start_r, len(raw_df)):
+                r = raw_df.iloc[idx]
+                if pd.isna(r[2]): continue
+                rows_extracted.append({
+                    'LOCAL': str(r[2]),
+                    'TIPO': str(r[3]) if pd.notna(r[3]) else '-',
+                    'ID_MEDIDOR': str(r[4]).split('.')[0] if pd.notna(r[4]) else '-',
+                    'INDICE_ANTIGO': r[6],
+                    'DATA_LEITURA': str(r[7]) if pd.notna(r[7]) else '06/10/2026',
+                    'LEITURA': r[8]
+                })
+            df_mes = pd.DataFrame(rows_extracted)
+        else:
+            df_mes = info_arq['df']
+
         cols_orig = list(df_mes.columns)
         cols_clean = {MotorFaturamento.limpa_nome_coluna(c): c for c in cols_orig}
 
-        # Mapeamento inteligente de colunas
+        col_ordem = next((cols_clean[k] for k in cols_clean if 'ORDEM' in k), None)
+        col_loc = next((cols_clean[k] for k in cols_clean if 'LOCAL' in k or 'UNIDADE' in k), None)
+        col_hid = next((cols_clean[k] for k in cols_clean if k in ['TIPO', 'DESCRICAO', 'HIDROMETRO'] or 'HIDRO' in k), None)
         col_med = next((cols_clean[k] for k in cols_clean if k in ['NDOMEDIDOR', 'N_DO_MEDIDOR', 'ID_MEDIDOR', 'IDMEDIDOR', 'MEDIDOR']), None)
         col_atu = next((cols_clean[k] for k in cols_clean if k in ['INDICE', 'LEITURA', 'LEITURA_ATU', 'LEITURAATU']), None)
         col_ant = next((cols_clean[k] for k in cols_clean if k in ['INDICEANTIGO', 'INDICE_ANTIGO', 'LEITURAANTERIOR']), None)
         col_data = next((cols_clean[k] for k in cols_clean if k in ['DATA_LEVANT', 'DATALEVANT', 'DATA_LEITURA', 'DATALEITURA', 'DATA_LEITURA_ATU']), None)
 
-        # Alarmes do Walk-by
         col_alm_imp = next((cols_clean[k] for k in cols_clean if 'IMPOSSIVEL' in k), None)
         col_alm_desm = next((cols_clean[k] for k in cols_clean if 'DESMONTAGEM' in k or 'CORTE' in k), None)
         col_alm_vaz1 = next((cols_clean[k] for k in cols_clean if k == 'HAVAZAMENTO'), None)
@@ -234,14 +434,16 @@ class MotorFaturamento:
             raise ValueError(f"Colunas de Medidor ou Leitura não identificadas. Colunas lidas: {cols_orig[:8]}")
 
         registros_mes = {}
-        for _, row in df_mes.iterrows():
+        for idx_r, row in df_mes.iterrows():
             dna = MotorFaturamento.limpar_id_medidor(row[col_med])
             if not dna or dna == '-': continue
             l_atu = int(round(MotorFaturamento.limpar_num(row[col_atu], 0.0)))
-            l_ant = int(round(MotorFaturamento.limpar_num(row[col_ant], -1.0))) if col_ant else -1
+            l_ant = int(round(MotorFaturamento.limpar_num(row[col_ant], -1.0))) if col_ant and pd.notna(row[col_ant]) and str(row[col_ant]).strip() != '' else -1
             dt_str = str(row[col_data]).strip().split(' ')[0] if col_data and pd.notna(row[col_data]) else "06/10/2026"
+            ord_arq = int(MotorFaturamento.limpar_num(row[col_ordem], idx_r + 1)) if col_ordem else (idx_r + 1)
+            loc_arq = str(row[col_loc]).strip() if col_loc and pd.notna(row[col_loc]) else ""
+            hid_arq = str(row[col_hid]).strip() if col_hid and pd.notna(row[col_hid]) and str(row[col_hid]).strip() not in ['nan', 'None'] else ""
 
-            # Extração de Alarmes
             def flag(c):
                 if not c or pd.isna(row[c]): return 0
                 v = str(row[c]).strip()
@@ -257,39 +459,62 @@ class MotorFaturamento:
                 'retorno': flag(col_alm_ret),
                 'sem_transmissao': 0
             }
-            # No Mizar, verifica se a data está congelada (mês diferente de 10/2026 ou anterior ao lote)
             if modo_leitura == 'MIZAR' and ('/10/' not in dt_str and '-10-' not in dt_str):
                 alm['sem_transmissao'] = 1
 
             registros_mes[dna] = {
-                'l_atu': l_atu,
-                'l_ant': l_ant,
-                'data_atu': dt_str,
+                'l_atu': l_atu, 'l_ant': l_ant, 'data_atu': dt_str,
+                'ordem_arq': ord_arq, 'loc_arq': loc_arq, 'hid_arq': hid_arq,
                 'alarmes': alm
             }
 
-        # Monta linhas processadas mantendo a ordem oficial
+        # Sincroniza permanentemente Hidrômetros, Blocos e Leituras Anteriores na Base Fixa
+        atualizou_db = False
+        for m_obj in medidores_db:
+            info_m = registros_mes.get(m_obj.medidor_dna)
+            if info_m:
+                if info_m['l_ant'] >= 0 and m_obj.l_anterior != info_m['l_ant']:
+                    m_obj.l_anterior = float(info_m['l_ant'])
+                    atualizou_db = True
+                if info_m['hid_arq'] and m_obj.hidrometro != info_m['hid_arq']:
+                    m_obj.hidrometro = info_m['hid_arq']
+                    atualizou_db = True
+                if not m_obj.bloco and info_m['loc_arq']:
+                    b, a, u_grp, u_curta = MotorFaturamento.extrair_bloco_andar_unid(info_m['loc_arq'])
+                    m_obj.bloco = b
+                    m_obj.andar = a
+                    m_obj.unidade = u_grp
+                    m_obj.unidade_curta = u_curta
+                    m_obj.ordem = info_m['ordem_arq']
+                    m_obj.tipo = MotorFaturamento.classificar_tipo(info_m['loc_arq'], m_obj.medidor_visual, info_m['ordem_arq'])
+                    atualizou_db = True
+        if atualizou_db:
+            db.session.commit()
+            medidores_db = MedidorBaseV4.query.order_by(MedidorBaseV4.ordem, MedidorBaseV4.id).all()
+
         linhas_proc = []
-        for _, cad in df_cad.iterrows():
-            dna = cad['MEDIDOR_DNA']
-            tipo = cad['TIPO']
-            l_ant_final = int(round(float(cad['L_ANTERIOR_BASE'])))
-            dt_ant_final = cad['DATA_ANT_BASE']
+        for cad in medidores_db:
+            dna = cad.medidor_dna
+            tipo = cad.tipo
+            l_ant_final = int(round(float(cad.l_anterior)))
+            dt_ant_final = cad.data_anterior or "04/09/2026"
 
             if tipo == 'SEM_MEDIDOR' or dna.startswith('SEM_MED'):
                 linhas_proc.append({
-                    'ORDEM': int(cad['ORDEM']), 'BLOCO': cad['BLOCO'], 'ANDAR': cad['ANDAR'],
-                    'UNIDADE': cad['UNIDADE'], 'UNIDADE_RAW': cad['UNIDADE_RAW'], 'TIPO': 'SEM_MEDIDOR',
+                    'ORDEM': int(cad.ordem), 'BLOCO': cad.bloco or 'B', 'ANDAR': cad.andar or '2º',
+                    'UNIDADE': cad.unidade, 'UNIDADE_CURTA': cad.unidade_curta or '251',
+                    'UNIDADE_RAW': cad.unidade_raw, 'TIPO': 'SEM_MEDIDOR',
                     'HIDROMETRO': '-', 'MEDIDOR_VISUAL': '-', 'MEDIDOR_DNA': dna,
                     'DATA_ANT': '-', 'L_ANTERIOR': 0, 'DATA_LEITURA': '-', 'VAL_ATU': 0,
-                    'CONSUMO': 0, 'FRACAO': float(cad['FRACAO']), 'TAXA': 0.0,
+                    'CONSUMO': 0, 'FRACAO': float(cad.fracao), 'TAXA': 0.0,
                     'ALARMES': {'impossivel':0,'desmontagem':0,'vazamento':0,'fraude':0,'bloqueado':0,'subvazao':0,'retorno':0,'sem_transmissao':0}
                 })
                 continue
 
             info_m = registros_mes.get(dna, None)
+            hidro_final = cad.hidrometro or (info_m['hid_arq'] if info_m else '-')
             if info_m:
-                if info_m['l_ant'] >= 0 and l_ant_final == 0:
+                if info_m['l_ant'] >= 0:
                     l_ant_final = info_m['l_ant']
                 l_atu_final = info_m['l_atu']
                 dt_atu_final = info_m['data_atu']
@@ -299,7 +524,7 @@ class MotorFaturamento:
                 dt_atu_final = "N/A"
                 alm_final = {'impossivel':0,'desmontagem':0,'vazamento':0,'fraude':0,'bloqueado':0,'subvazao':0,'retorno':0,'sem_transmissao':1}
 
-            # Tratamento da Virada de Relógio (Ex: Medidor 23003778 na D - 139: 999995 -> 2)
+            # Tratamento da Virada de Relógio (D - 1º - 139, medidor 23003778: 999995 -> 2 = 7 m³)
             if l_ant_final >= 999900 and l_atu_final < 1000:
                 if modo_leitura == 'MIZAR' and l_atu_final == 0:
                     l_atu_exib = 1000000
@@ -311,19 +536,18 @@ class MotorFaturamento:
                 consumo = max(0, l_atu_final - l_ant_final)
 
             linhas_proc.append({
-                'ORDEM': int(cad['ORDEM']), 'BLOCO': cad['BLOCO'], 'ANDAR': cad['ANDAR'],
-                'UNIDADE': cad['UNIDADE'], 'UNIDADE_RAW': cad['UNIDADE_RAW'], 'TIPO': tipo,
-                'HIDROMETRO': cad['HIDROMETRO'], 'MEDIDOR_VISUAL': cad['MEDIDOR_VISUAL'], 'MEDIDOR_DNA': dna,
+                'ORDEM': int(cad.ordem), 'BLOCO': cad.bloco, 'ANDAR': cad.andar,
+                'UNIDADE': cad.unidade, 'UNIDADE_CURTA': cad.unidade_curta or cad.unidade,
+                'UNIDADE_RAW': cad.unidade_raw, 'TIPO': tipo,
+                'HIDROMETRO': hidro_final or '-', 'MEDIDOR_VISUAL': cad.medidor_visual, 'MEDIDOR_DNA': dna,
                 'DATA_ANT': dt_ant_final, 'L_ANTERIOR': l_ant_final, 'DATA_LEITURA': dt_atu_final, 'VAL_ATU': l_atu_exib,
-                'CONSUMO': consumo, 'FRACAO': float(cad['FRACAO']), 'TAXA': float(cad['TAXA_BASE']),
+                'CONSUMO': consumo, 'FRACAO': float(cad.fracao), 'TAXA': float(cad.taxa),
                 'ALARMES': alm_final
             })
 
         df = pd.DataFrame(linhas_proc)
 
-        # =========================================================================
         # 1. CÁLCULO COMERCIAL (5 Unidades = 4 Lojas Diretas + Lavanderia OMO)
-        # =========================================================================
         mask_com_todos = df['TIPO'].isin(['COMERCIAL', 'COMERCIAL_OMO'])
         total_m3_com = float(df.loc[mask_com_todos, 'CONSUMO'].sum())
         preco_m3_com = (val_caesb_com / total_m3_com) if total_m3_com > 0 else 0.0
@@ -335,39 +559,29 @@ class MotorFaturamento:
 
         df.loc[mask_com_todos, 'V_AGUA'] = df.loc[mask_com_todos, 'CONSUMO'] * preco_m3_com
 
-        # =========================================================================
         # 2. CÁLCULO RESIDENCIAL, EMPÓRIO, UNIDADE 251 E ÁREAS COMUNS
-        # =========================================================================
         mask_res_padrao = df['TIPO'] == 'RESIDENCIAL'
         mask_sem_med = df['TIPO'] == 'SEM_MEDIDOR'
         mask_emporio = df['TIPO'] == 'EMPORIO'
         mask_area_comum = df['TIPO'] == 'AREA_COMUM'
 
-        # Tarifa Fixa (R$ 11,62 Água + R$ 11,62 Esgoto) apenas 1x por Unidade Residencial e na 251 (Empório é isento!)
         mask_recebe_fixa = (mask_res_padrao | mask_sem_med) & (~df.duplicated(subset=['UNIDADE']))
         df.loc[mask_recebe_fixa, 'FIXA_AGUA'] = 11.62
         df.loc[mask_recebe_fixa, 'FIXA_ESGOTO'] = 11.62
 
-        # Tarifa Variável em Cascata (Residencial, Empório e 35 Áreas Comuns)
         mask_cascata = mask_res_padrao | mask_emporio | mask_area_comum
         df.loc[mask_cascata, 'V_AGUA'] = df.loc[mask_cascata, 'CONSUMO'].apply(MotorFaturamento.calcular_caesb_cascata)
         df.loc[mask_cascata, 'V_ESGOTO'] = df.loc[mask_cascata, 'V_AGUA']
 
-        # Linha por Linha: Consumo Individual Total
         df['SUBTOTAL_LINHA'] = df['FIXA_AGUA'] + df['FIXA_ESGOTO'] + df['V_AGUA'] + df['V_ESGOTO']
 
-        # =========================================================================
-        # 3. FECHAMENTO DO RATEIO POR FRAÇÃO IDEAL (FÓRMULA OFICIAL DA PLANILHA)
-        # =========================================================================
-        # Bloco das Unidades Pagantes de Rateio: Empório + 750 Apartamentos (inclui B-251)
+        # 3. FECHAMENTO DO RATEIO POR FRAÇÃO IDEAL
         mask_bloco_res = df['TIPO'].isin(['RESIDENCIAL', 'EMPORIO', 'SEM_MEDIDOR'])
-        # Bloco de Área Comum (36 medidores = Lavanderia OMO + 35 Áreas Comuns)
         mask_bloco_comum = df['TIPO'].isin(['AREA_COMUM', 'COMERCIAL_OMO'])
 
         consumo_rs_unidades = float(df.loc[mask_bloco_res, 'SUBTOTAL_LINHA'].sum())
         taxa_leitura_unidades = float(df.loc[mask_bloco_res, 'TAXA'].sum())
 
-        # Na planilha oficial (Linha 26 da aba COBRANÇA), o Esgoto da Área Comum (O26) espelha 100% de N26 (que inclui Lavanderia OMO)
         v_agua_comum_total = float(df.loc[mask_bloco_comum, 'V_AGUA'].sum())
         v_esgoto_comum_total = v_agua_comum_total
         consumo_rs_comum = v_agua_comum_total + v_esgoto_comum_total
@@ -378,23 +592,23 @@ class MotorFaturamento:
         arrecadacao_unidades_base = consumo_rs_unidades + taxa_leitura_unidades
         diferenca_caesb = (consumo_rs_unidades + consumo_rs_comum) - val_caesb_res
 
-        # Q35: Valor Exato a ser Rateado por Fração Ideal
         valor_a_ratear = despesa_total_condominio - arrecadacao_unidades_base
 
-        # Aplica a Fração Ideal apenas na 1ª linha de cada Unidade Pagante (Empório + 750 Aptos)
         df['FRACAO_UNICA'] = 0.0
         mask_primeira_linha_res = mask_bloco_res & (~df.duplicated(subset=['UNIDADE']))
         df.loc[mask_primeira_linha_res, 'FRACAO_UNICA'] = df.loc[mask_primeira_linha_res, 'FRACAO']
 
         df['VAL_RATEIO'] = df['FRACAO_UNICA'] * valor_a_ratear
 
-        # Calcula SUBTOTAL Agrupado da Unidade e TOTAL Agrupado da Unidade (para exibição idêntica à planilha)
+        # Agrupamento por Unidade incluindo lista de Hidrômetros e Medidores
         somas_unidade = df.groupby('UNIDADE').agg(
             SUBTOTAL_UNIDADE=('SUBTOTAL_LINHA', 'sum'),
             RATEIO_UNIDADE=('VAL_RATEIO', 'sum'),
             TAXA_UNIDADE=('TAXA', 'sum'),
             CONSUMO_UNIDADE=('CONSUMO', 'sum'),
-            QTD_MEDIDORES=('MEDIDOR_DNA', lambda x: sum(1 for i in x if not str(i).startswith('SEM_MED')))
+            QTD_MEDIDORES=('MEDIDOR_DNA', lambda x: sum(1 for i in x if not str(i).startswith('SEM_MED'))),
+            HIDROMETROS_STR=('HIDROMETRO', lambda x: " / ".join([str(v) for v in x if str(v).strip() not in ['', '-']]) or '-'),
+            MEDIDORES_STR=('MEDIDOR_VISUAL', lambda x: " / ".join([str(v) for v in x if str(v).strip() not in ['', '-']]) or '-')
         ).reset_index()
         somas_unidade['TOTAL_UNIDADE'] = somas_unidade['SUBTOTAL_UNIDADE'] + somas_unidade['RATEIO_UNIDADE'] + somas_unidade['TAXA_UNIDADE']
 
@@ -412,11 +626,9 @@ class MotorFaturamento:
                 df.at[idx, 'SUBTOTAL'] = mapa_sub[u_nome]['SUBTOTAL_UNIDADE']
                 df.at[idx, 'TOTAL'] = mapa_sub[u_nome]['TOTAL_UNIDADE']
 
-        # =========================================================================
-        # 4. CONSOLIDAÇÃO POR UNIDADE (ABA COBRANÇA / ÂNCORA)
-        # =========================================================================
+        # 4. CONSOLIDAÇÃO POR UNIDADE (ABA COBRANÇA / ÂNCORA COM HIDRÔMETRO + MEDIDOR)
         unidades_consolidadas = []
-        ordem_unidades = df.drop_duplicates(subset=['UNIDADE'])[['ORDEM', 'BLOCO', 'ANDAR', 'UNIDADE', 'TIPO', 'FRACAO_UNICA']]
+        ordem_unidades = df.drop_duplicates(subset=['UNIDADE'])[['ORDEM', 'BLOCO', 'ANDAR', 'UNIDADE', 'UNIDADE_CURTA', 'TIPO', 'FRACAO_UNICA']]
         for _, u_row in ordem_unidades.iterrows():
             if u_row['TIPO'] in ['AREA_COMUM', 'COMERCIAL_OMO']:
                 continue
@@ -424,10 +636,13 @@ class MotorFaturamento:
             info_s = mapa_sub[u_nome]
             unidades_consolidadas.append({
                 'ORDEM': int(u_row['ORDEM']),
-                'BLOCO': u_row['BLOCO'],
-                'ANDAR': u_row['ANDAR'],
+                'BLOCO': u_row['BLOCO'] or '-',
+                'ANDAR': u_row['ANDAR'] or '-',
                 'UNIDADE': u_nome,
+                'UNIDADE_CURTA': u_row['UNIDADE_CURTA'] or u_nome,
                 'TIPO': u_row['TIPO'],
+                'HIDROMETROS': info_s['HIDROMETROS_STR'],
+                'MEDIDORES': info_s['MEDIDORES_STR'],
                 'QTD_MED': int(info_s['QTD_MEDIDORES']),
                 'FRACAO': float(u_row['FRACAO_UNICA']),
                 'CONSUMO': float(info_s['CONSUMO_UNIDADE']),
@@ -437,9 +652,7 @@ class MotorFaturamento:
                 'TOTAL': float(info_s['TOTAL_UNIDADE'])
             })
 
-        # =========================================================================
-        # 5. CONSOLIDAÇÃO DE ALARMES
-        # =========================================================================
+        # 5. ALARMES
         lista_alarmes = []
         contagem_alarmes = {
             'bloqueado': 0, 'vazamento': 0, 'subvazao': 0,
@@ -475,7 +688,6 @@ class MotorFaturamento:
                     'ALERTAS': " | ".join(ativos)
                 })
 
-        # Resumo Executivo Geral (Aba GERAL)
         m3_res_unidades = float(df.loc[mask_bloco_res, 'CONSUMO'].sum())
         m3_area_comum = float(df.loc[mask_bloco_comum, 'CONSUMO'].sum())
         arrecadacao_com_lojas = float(df.loc[df['TIPO'] == 'COMERCIAL', 'SUBTOTAL_LINHA'].sum() + df.loc[df['TIPO'] == 'COMERCIAL', 'TAXA'].sum())
@@ -487,6 +699,7 @@ class MotorFaturamento:
             'm3_caesb_res': m3_caesb_res,
             'fatura_caesb_com': val_caesb_com,
             'm3_caesb_com': m3_caesb_com,
+            'caesb_detalhes': dados_caesb,
             'consumo_global_m3': m3_res_unidades + m3_area_comum + float(df.loc[df['TIPO'] == 'COMERCIAL', 'CONSUMO'].sum()),
             'm3_unidades_res': m3_res_unidades,
             'm3_area_comum': m3_area_comum,
@@ -518,7 +731,7 @@ class MotorFaturamento:
 
 
 # ==============================================================================
-# INTERFACE WEB ENTERPRISE (HTML5 / CSS3 / JS - LAYOUT FIEL À IMAGEM)
+# INTERFACE WEB ENTERPRISE COM BASE FIXA E COLUNA HIDRÔMETRO + MEDIDOR
 # ==============================================================================
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -530,6 +743,8 @@ HTML_TEMPLATE = """
     <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.28/jspdf.plugin.autotable.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
     <style>
         :root {
             --bg-dark: #09101d;
@@ -551,12 +766,12 @@ HTML_TEMPLATE = """
             background: radial-gradient(circle at top, #132036 0%, #070c16 100%);
             color: var(--text-main);
             margin: 0;
-            padding: 18px;
+            padding: 16px;
             min-height: 100vh;
         }
-        .container { max-width: 1560px; margin: auto; }
+        .container { max-width: 1620px; margin: auto; }
 
-        /* BARRA SUPERIOR DE MÓDULOS (1. MIZAR | 2. WALK-BY | 3. COMPARATIVO) */
+        /* 1. BARRA SUPERIOR DE MÓDULOS */
         .top-modules {
             display: grid;
             grid-template-columns: 1fr 1fr 0.75fr;
@@ -576,7 +791,6 @@ HTML_TEMPLATE = """
             color: var(--text-main);
             font-weight: 700;
             font-size: 16px;
-            letter-spacing: 0.5px;
         }
         .module-left { display: flex; align-items: center; gap: 12px; }
         .badge-num {
@@ -607,51 +821,58 @@ HTML_TEMPLATE = """
         }
         .module-btn.active-comp .badge-num { background: var(--comp-slate); }
 
-        /* SUB-ABAS (GERAL | UNIDADES | COBRANÇA | ALARMES) */
-        .sub-nav {
+        /* 2. SUB-ABAS E STATUS DA BASE FIXA */
+        .sub-nav-wrap {
             display: flex;
-            gap: 10px;
-            margin-bottom: 18px;
-            flex-wrap: wrap;
-        }
-        .sub-tab {
-            background: #111c2d;
-            border: 1px solid var(--panel-border);
-            color: var(--text-muted);
-            padding: 10px 22px;
-            border-radius: 8px;
-            cursor: pointer;
-            font-weight: 700;
-            font-size: 13px;
-            display: flex;
+            justify-content: space-between;
             align-items: center;
-            gap: 8px;
-            transition: 0.2s;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin-bottom: 16px;
+        }
+        .sub-nav { display: flex; gap: 10px; flex-wrap: wrap; }
+        .sub-tab {
+            background: #111c2d; border: 1px solid var(--panel-border);
+            color: var(--text-muted); padding: 10px 20px; border-radius: 8px;
+            cursor: pointer; font-weight: 700; font-size: 13px;
+            display: flex; align-items: center; gap: 8px; transition: 0.2s;
         }
         .sub-tab:hover { color: white; border-color: #3b82f6; }
         .sub-tab.active-sub-mizar { background: var(--mizar-blue); color: white; border-color: var(--mizar-blue); }
         .sub-tab.active-sub-walkby { background: var(--walkby-green); color: white; border-color: var(--walkby-green); }
-        .sub-tab.active-sub-comp { background: var(--comp-slate); color: white; border-color: var(--comp-slate); }
 
-        /* CARDS KPI PRINCIPAIS */
+        .base-fixa-bar {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            background: rgba(16, 185, 129, 0.12);
+            border: 1px solid rgba(16, 185, 129, 0.4);
+            padding: 6px 14px;
+            border-radius: 8px;
+            font-size: 12px;
+            font-weight: 700;
+            color: #34d399;
+        }
+
+        /* 3. CARDS KPI */
         .kpi-grid {
             display: grid;
             grid-template-columns: repeat(4, 1fr);
-            gap: 15px;
-            margin-bottom: 18px;
+            gap: 14px;
+            margin-bottom: 16px;
         }
         .kpi-card {
             background: var(--panel-bg);
             border: 1px solid var(--panel-border);
             border-radius: 12px;
-            padding: 18px 20px;
+            padding: 16px 18px;
             display: flex;
             align-items: center;
-            gap: 16px;
+            gap: 14px;
             box-shadow: 0 6px 15px rgba(0,0,0,0.25);
         }
         .kpi-icon {
-            width: 52px; height: 52px; border-radius: 50%;
+            width: 50px; height: 50px; border-radius: 50%;
             display: flex; align-items: center; justify-content: center;
             font-size: 22px; flex-shrink: 0;
         }
@@ -659,45 +880,85 @@ HTML_TEMPLATE = """
         .icon-amber { background: rgba(217, 119, 6, 0.2); color: #fbbf24; border: 1px solid rgba(251,191,36,0.3); }
         .icon-indigo { background: rgba(99, 102, 241, 0.2); color: #818cf8; border: 1px solid rgba(129,140,248,0.3); }
         .icon-red { background: rgba(239, 68, 68, 0.2); color: #f87171; border: 1px solid rgba(248,113,113,0.3); }
-        .kpi-info h4 { margin: 0 0 6px 0; font-size: 12px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.6px; }
-        .kpi-info h2 { margin: 0; font-size: 25px; font-weight: 800; }
+        .kpi-info h4 { margin: 0 0 5px 0; font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.6px; }
+        .kpi-info h2 { margin: 0; font-size: 24px; font-weight: 800; }
 
-        /* BARRA DE CONTROLES E UPLOADS */
-        .control-panel {
+        /* 4. PAINEL DE FATURAS CAESB */
+        .caesb-panel {
             background: var(--panel-bg);
             border: 1px solid var(--panel-border);
             border-radius: 12px;
             padding: 16px 20px;
-            display: flex;
-            flex-wrap: wrap;
-            justify-content: space-between;
-            align-items: center;
-            gap: 15px;
             margin-bottom: 16px;
         }
-        .inputs-wrap { display: flex; gap: 14px; flex-wrap: wrap; align-items: center; }
-        .field-box { display: flex; flex-direction: column; gap: 5px; }
-        .field-box label { font-size: 12px; color: var(--text-muted); font-weight: 600; }
-        .field-box input {
-            background: #09101d; border: 1px solid #2dd4bf40;
-            color: white; padding: 10px 14px; border-radius: 8px;
-            font-weight: 700; font-size: 14px; width: 175px;
+        .caesb-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 12px;
+            margin-bottom: 14px;
+            padding-bottom: 10px;
+            border-bottom: 1px solid var(--panel-border);
         }
-        .btn-group { display: flex; gap: 10px; flex-wrap: wrap; }
+        .caesb-title {
+            font-size: 14px;
+            font-weight: 800;
+            color: #38bdf8;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .caesb-grid {
+            display: grid;
+            grid-template-columns: repeat(10, 1fr);
+            gap: 10px;
+            margin-bottom: 14px;
+        }
+        @media (max-width: 1300px) {
+            .caesb-grid { grid-template-columns: repeat(5, 1fr); }
+        }
+        .field-box { display: flex; flex-direction: column; gap: 4px; }
+        .field-box label { font-size: 11px; color: var(--text-muted); font-weight: 700; white-space: nowrap; }
+        .field-box input {
+            background: #09101d;
+            border: 1px solid #10b98160;
+            color: #ecfdf5;
+            padding: 8px 10px;
+            border-radius: 7px;
+            font-weight: 700;
+            font-size: 13px;
+            width: 100%;
+            text-align: center;
+        }
+        .field-box input.highlight-green {
+            border-color: #10b981;
+            background: rgba(16, 185, 129, 0.12);
+            color: #34d399;
+        }
+        .field-box input.highlight-amber {
+            border-color: #f59e0b;
+            background: rgba(245, 158, 11, 0.12);
+            color: #fbbf24;
+        }
+
+        .btn-group { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
         button {
-            padding: 11px 18px; border: none; border-radius: 8px;
+            padding: 10px 16px; border: none; border-radius: 8px;
             font-weight: 700; font-size: 13px; cursor: pointer;
             color: white; display: flex; align-items: center; gap: 8px;
             transition: 0.2s;
         }
         button:hover { filter: brightness(1.15); transform: translateY(-1px); }
-        .btn-gold { background: linear-gradient(135deg, #d97706, #b45309); }
+        .btn-ocr-res { background: linear-gradient(135deg, #0284c7, #0369a1); border: 1px solid #38bdf860; }
+        .btn-ocr-com { background: linear-gradient(135deg, #b45309, #92400e); border: 1px solid #fbbf2460; }
         .btn-mizar { background: linear-gradient(135deg, #2563eb, #1d4ed8); }
         .btn-walkby { background: linear-gradient(135deg, #10b981, #059669); }
+        .btn-subtle { background: #1e293b; border: 1px solid #334155; color: #cbd5e1; padding: 8px 12px; font-size: 12px; }
         .btn-excel { background: linear-gradient(135deg, #16a34a, #15803d); }
         .btn-pdf { background: linear-gradient(135deg, #dc2626, #b91c1c); }
 
-        /* BARRA DE PESQUISA E EXPORTAÇÃO */
+        /* 5. BARRA DE PESQUISA E EXPORTAÇÃO */
         .search-panel {
             background: #16243a;
             border: 1px solid var(--panel-border);
@@ -713,27 +974,43 @@ HTML_TEMPLATE = """
         .search-box { flex: 1; min-width: 280px; display: flex; flex-direction: column; gap: 6px; }
         .search-box label { font-size: 13px; font-weight: 700; color: #cbd5e1; }
         .search-box input {
-            width: 100%; padding: 11px 15px; border-radius: 8px;
+            width: 100%; padding: 10px 14px; border-radius: 8px;
             border: 1px solid #334155; background: #0b1322; color: white; font-size: 14px;
         }
 
-        /* TABELAS E PAINÉIS DE CONTEÚDO */
+        /* 6. TABELAS E CONTEÚDO */
         .content-box {
             background: var(--panel-bg);
             border: 1px solid var(--panel-border);
             border-radius: 12px;
             padding: 16px;
             overflow-x: auto;
-            max-height: 620px;
+            max-height: 640px;
         }
         table { width: 100%; border-collapse: collapse; font-size: 13px; }
         th {
-            background: #1a2942; color: #e2e8f0; padding: 12px 10px;
+            background: #1a2942; color: #e2e8f0; padding: 11px 8px;
             position: sticky; top: 0; z-index: 10; text-align: center;
             font-weight: 700; border-bottom: 2px solid #2d4263;
         }
-        td { padding: 10px 8px; text-align: center; border-bottom: 1px solid #1e293b; }
+        td { padding: 9px 8px; text-align: center; border-bottom: 1px solid #1e293b; }
         tr:hover { background: rgba(59, 130, 246, 0.08); }
+
+        .hidro-badge {
+            color: #38bdf8;
+            font-family: 'Consolas', 'Courier New', monospace;
+            font-weight: 700;
+            background: rgba(56, 189, 248, 0.1);
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 12px;
+        }
+        .med-badge {
+            color: #f8fafc;
+            font-family: 'Consolas', 'Courier New', monospace;
+            font-weight: 700;
+            font-size: 12.5px;
+        }
 
         .tag-res { color: #38bdf8; font-weight: 700; }
         .tag-com { color: #fbbf24; font-weight: 700; }
@@ -741,21 +1018,19 @@ HTML_TEMPLATE = """
         .tag-are { color: #34d399; font-weight: 700; }
         .tag-sem { color: #f472b6; font-weight: 700; }
 
-        /* QUADROS EXECUTIVOS DA ABA GERAL */
-        .exec-section { margin-bottom: 24px; }
+        .exec-section { margin-bottom: 22px; }
         .exec-title {
             background: linear-gradient(90deg, #1e3a8a, #0f172a);
-            padding: 10px 16px; border-radius: 8px; font-weight: 800;
-            font-size: 14px; letter-spacing: 0.5px; margin-bottom: 10px;
+            padding: 9px 15px; border-radius: 8px; font-weight: 800;
+            font-size: 13px; letter-spacing: 0.5px; margin-bottom: 10px;
             border-left: 4px solid #38bdf8;
         }
         .exec-title.orange { background: linear-gradient(90deg, #7c2d12, #0f172a); border-left-color: #fbbf24; }
         .exec-title.green { background: linear-gradient(90deg, #065f46, #0f172a); border-left-color: #34d399; }
 
-        /* OVERLAY DE CARREGAMENTO */
         #loading {
             display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-            background: rgba(7, 12, 22, 0.85); z-index: 9999;
+            background: rgba(7, 12, 22, 0.88); z-index: 9999;
             justify-content: center; align-items: center; flex-direction: column;
         }
         .spinner {
@@ -769,7 +1044,7 @@ HTML_TEMPLATE = """
 
 <div id="loading">
     <div class="spinner"></div>
-    <h3 id="loading-msg" style="margin-top: 18px; color: #38bdf8;">Processando Engenharia CAESB...</h3>
+    <h3 id="loading-msg" style="margin-top: 18px; color: #38bdf8; text-align:center; max-width:520px;">Processando...</h3>
 </div>
 
 <div class="container">
@@ -780,14 +1055,14 @@ HTML_TEMPLATE = """
                 <span class="badge-num">1</span>
                 <span>💧 MIZAR (Telemetria)</span>
             </div>
-            <span id="status-mizar" class="status-pill">Aguardando CSV</span>
+            <span id="status-mizar" class="status-pill">Aguardando Leitura</span>
         </div>
         <div id="mod-WALKBY" class="module-btn" onclick="selecionarModulo('WALKBY')">
             <div class="module-left">
                 <span class="badge-num">2</span>
                 <span>🚶 WALK-BY (Coleta Antena)</span>
             </div>
-            <span id="status-walkby" class="status-pill">Aguardando TXT/XLSX</span>
+            <span id="status-walkby" class="status-pill">Aguardando Leitura</span>
         </div>
         <div id="mod-COMPARATIVO" class="module-btn" onclick="selecionarModulo('COMPARATIVO')">
             <div class="module-left">
@@ -798,12 +1073,21 @@ HTML_TEMPLATE = """
         </div>
     </div>
 
-    <!-- 2. SUB-ABAS DE NAVEGAÇÃO -->
-    <div class="sub-nav" id="sub-nav-bar">
-        <button id="sub-GERAL" class="sub-tab active-sub-mizar" onclick="selecionarSubAba('GERAL')">🏠 GERAL (Demonstrativo)</button>
-        <button id="sub-UNIDADES" class="sub-tab" onclick="selecionarSubAba('UNIDADES')">🏢 UNIDADES (1.576 Hidrômetros)</button>
-        <button id="sub-COBRANCA" class="sub-tab" onclick="selecionarSubAba('COBRANCA')">💲 COBRANÇA (Âncora 756 Unids)</button>
-        <button id="sub-ALARMES" class="sub-tab" onclick="selecionarSubAba('ALARMES')">🔔 ALARMES & AUDITORIA</button>
+    <!-- 2. SUB-ABAS DE NAVEGAÇÃO + INDICADOR DE BASE FIXA -->
+    <div class="sub-nav-wrap">
+        <div class="sub-nav" id="sub-nav-bar">
+            <button id="sub-GERAL" class="sub-tab active-sub-mizar" onclick="selecionarSubAba('GERAL')">🏠 GERAL (Demonstrativo)</button>
+            <button id="sub-UNIDADES" class="sub-tab" onclick="selecionarSubAba('UNIDADES')">🏢 UNIDADES (Hidrômetro + Medidor)</button>
+            <button id="sub-COBRANCA" class="sub-tab" onclick="selecionarSubAba('COBRANCA')">💲 COBRANÇA (Âncora 756 Unids)</button>
+            <button id="sub-ALARMES" class="sub-tab" onclick="selecionarSubAba('ALARMES')">🔔 ALARMES & AUDITORIA</button>
+        </div>
+
+        <div class="base-fixa-bar">
+            <span id="lbl-base-fixa">🔒 Base Fixa Permanente Ativa no Sistema</span>
+            <button class="btn-subtle" onclick="virarMesBaseFixa()" title="Salva as leituras atuais como Leitura Anterior para o próximo mês">🔄 Virar Mês</button>
+            <input type="file" id="file_base" accept=".xlsx,.xls,.csv,.txt" style="display:none" onchange="uploadBase()">
+            <button class="btn-subtle" onclick="document.getElementById('file_base').click()" title="Opcional: Sincronizar planilha mestre de frações">⚙️ Atualizar Base Fixa</button>
+        </div>
     </div>
 
     <!-- 3. CARDS KPI -->
@@ -811,7 +1095,7 @@ HTML_TEMPLATE = """
         <div class="kpi-card">
             <div class="kpi-icon icon-blue">💧</div>
             <div class="kpi-info">
-                <h4 id="kpi1-title">CONSUMO GLOBAL (M³)</h4>
+                <h4 id="kpi1-title">CONSUMO MEDIDO UNIDS</h4>
                 <h2 id="lbl-consumo">0.0</h2>
             </div>
         </div>
@@ -825,7 +1109,7 @@ HTML_TEMPLATE = """
         <div class="kpi-card">
             <div class="kpi-icon icon-indigo">🏢</div>
             <div class="kpi-info">
-                <h4 id="kpi3-title">ARRECADAÇÃO COMERCIAL</h4>
+                <h4 id="kpi3-title">FATURA COMERCIAL</h4>
                 <h2 id="lbl-arr-com" style="color:#fbbf24;">R$ 0,00</h2>
             </div>
         </div>
@@ -838,44 +1122,131 @@ HTML_TEMPLATE = """
         </div>
     </div>
 
-    <!-- 4. PAINEL DE FATURAS E UPLOADS -->
-    <div class="control-panel">
-        <div class="inputs-wrap">
-            <div class="field-box">
-                <label>Fatura CAESB (Residencial R$)</label>
-                <input type="number" id="val_res" value="62562.80" step="0.01">
+    <!-- 4. PAINEL INTELIGENTE DA CONTA CAESB (10 CAMPOS VERDES + OCR PDF/JPEG) -->
+    <div class="caesb-panel">
+        <div class="caesb-header">
+            <div class="caesb-title">
+                <span>🧾 DADOS OFICIAIS DAS CONTAS CAESB (PREENCHIMENTO AUTOMÁTICO VIA PDF OU FOTO JPEG/PNG)</span>
             </div>
-            <div class="field-box">
-                <label>Consumo CAESB (Res m³)</label>
-                <input type="number" id="m3_res" value="5248" step="1" style="width:120px;">
-            </div>
-            <div class="field-box">
-                <label style="color:#fbbf24;">Fatura CAESB (Comercial R$)</label>
-                <input type="number" id="val_com" value="6452.54" step="0.01" style="color:#fbbf24; border-color:#fbbf2460;">
-            </div>
-            <div class="field-box">
-                <label style="color:#fbbf24;">Consumo CAESB (Com m³)</label>
-                <input type="number" id="m3_com" value="162" step="1" style="width:120px; color:#fbbf24;">
+            <div class="btn-group">
+                <input type="file" id="file_conta_res" accept=".pdf,.jpg,.jpeg,.png" style="display:none" onchange="importarContaCAESB('RES')">
+                <button class="btn-ocr-res" onclick="document.getElementById('file_conta_res').click()">📄 Importar Conta CAESB Residencial (PDF / JPEG)</button>
+
+                <input type="file" id="file_conta_com" accept=".pdf,.jpg,.jpeg,.png" style="display:none" onchange="importarContaCAESB('COM')">
+                <button class="btn-ocr-com" onclick="document.getElementById('file_conta_com').click()">📄 Importar Conta CAESB Comercial (PDF / JPEG)</button>
             </div>
         </div>
 
-        <div class="btn-group">
-            <input type="file" id="file_base" accept=".xlsx,.xls,.csv" style="display:none" onchange="uploadBase()">
-            <button class="btn-gold" onclick="document.getElementById('file_base').click()">📁 1. Carregar Base / Frações</button>
+        <!-- LINHA 1: 10 CAMPOS DA CONTA CAESB RESIDENCIAL -->
+        <div style="font-size:12px; font-weight:800; color:#34d399; margin-bottom:6px;">💧 CONTA CAESB — CATEGORIA RESIDENCIAL (HIDRÔMETRO EXTERNO GERAL)</div>
+        <div class="caesb-grid">
+            <div class="field-box">
+                <label>Data Leit. Ant.</label>
+                <input type="text" id="res_dt_ant" value="03/09/2026">
+            </div>
+            <div class="field-box">
+                <label>Leitura Anterior</label>
+                <input type="number" id="res_l_ant" value="411389" oninput="recalcularSomaCAESB('res')">
+            </div>
+            <div class="field-box">
+                <label>Data Leit. Atual</label>
+                <input type="text" id="res_dt_atu" value="06/10/2026">
+            </div>
+            <div class="field-box">
+                <label>Leitura Atual</label>
+                <input type="number" id="res_l_atu" value="416637" oninput="recalcularSomaCAESB('res')">
+            </div>
+            <div class="field-box">
+                <label>Volume Medido (m³)</label>
+                <input type="number" id="m3_res" value="5248" class="highlight-green">
+            </div>
+            <div class="field-box">
+                <label>Fixa Água (R$)</label>
+                <input type="number" id="res_fixa_agua" value="8715.00" step="0.01" oninput="recalcularSomaCAESB('res')">
+            </div>
+            <div class="field-box">
+                <label>Fixa Esgoto (R$)</label>
+                <input type="number" id="res_fixa_esg" value="8715.00" step="0.01" oninput="recalcularSomaCAESB('res')">
+            </div>
+            <div class="field-box">
+                <label>Variável Água (R$)</label>
+                <input type="number" id="res_var_agua" value="22566.40" step="0.01" oninput="recalcularSomaCAESB('res')">
+            </div>
+            <div class="field-box">
+                <label>Variável Esgoto (R$)</label>
+                <input type="number" id="res_var_esg" value="22566.40" step="0.01" oninput="recalcularSomaCAESB('res')">
+            </div>
+            <div class="field-box">
+                <label>TOTAL CAESB RES (R$)</label>
+                <input type="number" id="val_res" value="62562.80" step="0.01" class="highlight-green">
+            </div>
+        </div>
 
-            <input type="file" id="file_mizar" accept=".csv,.txt,.xlsx,.xls" style="display:none" onchange="processarArquivo('MIZAR')">
-            <button class="btn-mizar" onclick="document.getElementById('file_mizar').click()">💧 2. Processar MIZAR</button>
+        <!-- LINHA 2: 10 CAMPOS DA CONTA CAESB COMERCIAL -->
+        <div style="font-size:12px; font-weight:800; color:#fbbf24; margin-bottom:6px;">🏢 CONTA CAESB — CATEGORIA COMERCIAL (LOJAS / MEDIDOR EXTERNO)</div>
+        <div class="caesb-grid" style="margin-bottom: 16px;">
+            <div class="field-box">
+                <label>Data Leit. Ant.</label>
+                <input type="text" id="com_dt_ant" value="03/09/2026">
+            </div>
+            <div class="field-box">
+                <label>Leitura Anterior</label>
+                <input type="number" id="com_l_ant" value="1465" oninput="recalcularSomaCAESB('com')">
+            </div>
+            <div class="field-box">
+                <label>Data Leit. Atual</label>
+                <input type="text" id="com_dt_atu" value="06/10/2026">
+            </div>
+            <div class="field-box">
+                <label>Leitura Atual</label>
+                <input type="number" id="com_l_atu" value="1627" oninput="recalcularSomaCAESB('com')">
+            </div>
+            <div class="field-box">
+                <label>Volume Medido (m³)</label>
+                <input type="number" id="m3_com" value="162" class="highlight-amber">
+            </div>
+            <div class="field-box">
+                <label>Fixa Água (R$)</label>
+                <input type="number" id="com_fixa_agua" value="30.51" step="0.01" oninput="recalcularSomaCAESB('com')">
+            </div>
+            <div class="field-box">
+                <label>Fixa Esgoto (R$)</label>
+                <input type="number" id="com_fixa_esg" value="30.51" step="0.01" oninput="recalcularSomaCAESB('com')">
+            </div>
+            <div class="field-box">
+                <label>Variável Água (R$)</label>
+                <input type="number" id="com_var_agua" value="3195.76" step="0.01" oninput="recalcularSomaCAESB('com')">
+            </div>
+            <div class="field-box">
+                <label>Variável Esgoto (R$)</label>
+                <input type="number" id="com_var_esg" value="3195.76" step="0.01" oninput="recalcularSomaCAESB('com')">
+            </div>
+            <div class="field-box">
+                <label>TOTAL CAESB COM (R$)</label>
+                <input type="number" id="val_com" value="6452.54" step="0.01" class="highlight-amber">
+            </div>
+        </div>
 
-            <input type="file" id="file_walkby" accept=".txt,.csv,.xlsx,.xls" style="display:none" onchange="processarArquivo('WALKBY')">
-            <button class="btn-walkby" onclick="document.getElementById('file_walkby').click()">🚶 3. Processar WALK-BY</button>
+        <!-- BOTÕES DIRETOS DE PROCESSAMENTO MENSAL -->
+        <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px; padding-top:10px; border-top:1px solid var(--panel-border);">
+            <span style="font-size:12px; color:#34d399; font-weight:600;">
+                ✅ Cadastro de Medidores e Hidrômetros Fixo no Banco: Basta enviar diretamente o arquivo do mês (Mizar ou Walk-by)!
+            </span>
+            <div class="btn-group">
+                <input type="file" id="file_mizar" accept=".csv,.txt,.xlsx,.xls" style="display:none" onchange="processarArquivo('MIZAR')">
+                <button class="btn-mizar" onclick="document.getElementById('file_mizar').click()">💧 1. Processar Leitura MIZAR (.csv / .xlsx)</button>
+
+                <input type="file" id="file_walkby" accept=".txt,.csv,.xlsx,.xls" style="display:none" onchange="processarArquivo('WALKBY')">
+                <button class="btn-walkby" onclick="document.getElementById('file_walkby').click()">🚶 2. Processar Leitura WALK-BY (.txt / .xlsx)</button>
+            </div>
         </div>
     </div>
 
     <!-- 5. BARRA DE PESQUISA E EXPORTAÇÕES -->
     <div class="search-panel">
         <div class="search-box">
-            <label>🔍 Procurar por Medidor, Hidrômetro, Unidade ou Alarme (Filtro Instantâneo):</label>
-            <input type="text" id="searchInput" placeholder="Ex: 251, KITCLEAN, EMPORIO, 23712149, Bloqueado..." onkeyup="filtrarTabelaVisivel()">
+            <label>🔍 Procurar por Hidrômetro (ex: A23B182990), Medidor (ex: 23419692), Unidade ou Alarme:</label>
+            <input type="text" id="searchInput" placeholder="Digite o código do Hidrômetro, número do Medidor, Unidade (ex: 251, KITCLEAN)..." onkeyup="filtrarTabelaVisivel()">
         </div>
         <div class="btn-group">
             <button class="btn-excel" onclick="exportarExcelCompleto()">📊 Exportar Excel (Todas as Abas)</button>
@@ -886,17 +1257,20 @@ HTML_TEMPLATE = """
     <!-- 6. ÁREA DINÂMICA DE CONTEÚDO -->
     <div class="content-box" id="main-content">
         <div style="padding: 40px; text-align: center; color: var(--text-muted);">
-            <h3>Bem-vindo ao Sistema de Gestão de Água — Condomínio Brisas do Lago</h3>
-            <p>1. Clique em <b>Carregar Base / Frações</b> (pode enviar a planilha oficial de Outubro ou brisas.xlsx).<br>
-               2. Envie o arquivo <b>MIZAR (.csv)</b> e/ou <b>WALK-BY (.txt)</b> para visualizar todas as abas e o comparativo.</p>
+            <h3>Sistema Pronto — Base Fixa de Hidrômetros & Medidores Ativa</h3>
+            <p>Clique em <b>1. Processar Leitura MIZAR</b> ou <b>2. Processar Leitura WALK-BY</b> para gerar todas as abas e relatórios.</p>
         </div>
     </div>
 </div>
 
 <script>
+    if (window.pdfjsLib) {
+        window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+    }
+
     let estado = {
-        moduloAtivo: 'MIZAR',    // 'MIZAR', 'WALKBY', 'COMPARATIVO'
-        subAbaAtiva: 'GERAL',    // 'GERAL', 'UNIDADES', 'COBRANCA', 'ALARMES'
+        moduloAtivo: 'MIZAR',
+        subAbaAtiva: 'GERAL',
         MIZAR: null,
         WALKBY: null
     };
@@ -909,19 +1283,130 @@ HTML_TEMPLATE = """
         document.getElementById('loading').style.display = show ? 'flex' : 'none';
     }
 
-    // Carrega dados salvos no banco ao abrir a página
+    function recalcularSomaCAESB(pref) {
+        const lAnt = parseInt(document.getElementById(`${pref}_l_ant`).value) || 0;
+        const lAtu = parseInt(document.getElementById(`${pref}_l_atu`).value) || 0;
+        if (lAtu >= lAnt && lAtu > 0) {
+            document.getElementById(`m3_${pref}`).value = lAtu - lAnt;
+        }
+        const fa = parseFloat(document.getElementById(`${pref}_fixa_agua`).value) || 0;
+        const fe = parseFloat(document.getElementById(`${pref}_fixa_esg`).value) || 0;
+        const va = parseFloat(document.getElementById(`${pref}_var_agua`).value) || 0;
+        const ve = parseFloat(document.getElementById(`${pref}_var_esg`).value) || 0;
+        const soma = fa + fe + va + ve;
+        if (soma > 0) {
+            document.getElementById(`val_${pref}`).value = soma.toFixed(2);
+        }
+    }
+
+    async function importarContaCAESB(tipoAlvo) {
+        const inputId = tipoAlvo === 'RES' ? 'file_conta_res' : 'file_conta_com';
+        const file = document.getElementById(inputId).files[0];
+        if (!file) return;
+
+        showLoading(true, `Lendo Conta CAESB (${file.name}) via Visão Computacional OCR...`);
+        try {
+            let textoExtraido = "";
+            const fname = file.name.toLowerCase();
+
+            if (fname.endsWith('.pdf')) {
+                const arrayBuffer = await file.arrayBuffer();
+                const pdf = await window.pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+                for (let i = 1; i <= pdf.numPages; i++) {
+                    const page = await pdf.getPage(i);
+                    const content = await page.getTextContent();
+                    const pageText = content.items.map(item => item.str).join(' ');
+                    textoExtraido += pageText + "\n";
+
+                    if (pageText.trim().length < 30) {
+                        const viewport = page.getViewport({ scale: 2.0 });
+                        const canvas = document.createElement('canvas');
+                        const ctx = canvas.getContext('2d');
+                        canvas.width = viewport.width;
+                        canvas.height = viewport.height;
+                        await page.render({ canvasContext: ctx, viewport: viewport }).promise;
+                        const { data: { text } } = await Tesseract.recognize(canvas, 'por');
+                        textoExtraido += text + "\n";
+                    }
+                }
+            } else {
+                const { data: { text } } = await Tesseract.recognize(file, 'por');
+                textoExtraido = text;
+            }
+
+            let req = await fetch('/parse_conta_caesb', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ texto: textoExtraido })
+            });
+            let res = await req.json();
+            showLoading(false);
+
+            if (res.error) return alert("Erro ao interpretar fatura: " + res.error);
+
+            const pref = tipoAlvo === 'RES' ? 'res' : 'com';
+            if (res.data_ant) document.getElementById(`${pref}_dt_ant`).value = res.data_ant;
+            if (res.leitura_ant > 0) document.getElementById(`${pref}_l_ant`).value = res.leitura_ant;
+            if (res.data_atu) document.getElementById(`${pref}_dt_atu`).value = res.data_atu;
+            if (res.leitura_atu > 0) document.getElementById(`${pref}_l_atu`).value = res.leitura_atu;
+            if (res.volume_m3 > 0) document.getElementById(`m3_${pref}`).value = res.volume_m3;
+            if (res.fixa_agua > 0) document.getElementById(`${pref}_fixa_agua`).value = res.fixa_agua.toFixed(2);
+            if (res.fixa_esgoto > 0) document.getElementById(`${pref}_fixa_esg`).value = res.fixa_esgoto.toFixed(2);
+            if (res.var_agua > 0) document.getElementById(`${pref}_var_agua`).value = res.var_agua.toFixed(2);
+            if (res.var_esgoto > 0) document.getElementById(`${pref}_var_esg`).value = res.var_esgoto.toFixed(2);
+            if (res.total_fatura > 0) document.getElementById(`val_${pref}`).value = res.total_fatura.toFixed(2);
+
+            alert(`✅ Conta CAESB (${tipoAlvo === 'RES' ? 'Residencial' : 'Comercial'}) preenchida automaticamente!\n\n` +
+                  `• Período: ${res.data_ant || '-'} a ${res.data_atu || '-'}\n` +
+                  `• Leituras: ${res.leitura_ant} -> ${res.leitura_atu} (${res.volume_m3} m³)\n` +
+                  `• TOTAL A PAGAR: R$ ${res.total_fatura.toFixed(2)}`);
+        } catch (e) {
+            showLoading(false);
+            alert("Erro na leitura do arquivo: " + e);
+        }
+    }
+
+    function obterDadosCAESBFormulario() {
+        return {
+            res_dt_ant: document.getElementById('res_dt_ant').value,
+            res_l_ant: parseInt(document.getElementById('res_l_ant').value) || 0,
+            res_dt_atu: document.getElementById('res_dt_atu').value,
+            res_l_atu: parseInt(document.getElementById('res_l_atu').value) || 0,
+            m3_res: parseFloat(document.getElementById('m3_res').value) || 0,
+            res_fixa_agua: parseFloat(document.getElementById('res_fixa_agua').value) || 0,
+            res_fixa_esg: parseFloat(document.getElementById('res_fixa_esg').value) || 0,
+            res_var_agua: parseFloat(document.getElementById('res_var_agua').value) || 0,
+            res_var_esg: parseFloat(document.getElementById('res_var_esg').value) || 0,
+            val_res: parseFloat(document.getElementById('val_res').value) || 0,
+
+            com_dt_ant: document.getElementById('com_dt_ant').value,
+            com_l_ant: parseInt(document.getElementById('com_l_ant').value) || 0,
+            com_dt_atu: document.getElementById('com_dt_atu').value,
+            com_l_atu: parseInt(document.getElementById('com_l_atu').value) || 0,
+            m3_com: parseFloat(document.getElementById('m3_com').value) || 0,
+            com_fixa_agua: parseFloat(document.getElementById('com_fixa_agua').value) || 0,
+            com_fixa_esg: parseFloat(document.getElementById('com_fixa_esg').value) || 0,
+            com_var_agua: parseFloat(document.getElementById('com_var_agua').value) || 0,
+            com_var_esg: parseFloat(document.getElementById('com_var_esg').value) || 0,
+            val_com: parseFloat(document.getElementById('val_com').value) || 0
+        };
+    }
+
     window.addEventListener('DOMContentLoaded', async () => {
         try {
             let req = await fetch('/estado_inicial');
             let res = await req.json();
+            if (res.qtd_base_fixa) {
+                document.getElementById('lbl-base-fixa').innerText = `🔒 Base Fixa Permanente Ativa (${res.qtd_base_fixa} Medidores)`;
+            }
             if (res.MIZAR) {
                 estado.MIZAR = res.MIZAR;
-                document.getElementById('status-mizar').innerText = "✅ Carregado";
+                document.getElementById('status-mizar').innerText = "✅ Salvo no Banco";
                 document.getElementById('status-mizar').style.color = "#38bdf8";
             }
             if (res.WALKBY) {
                 estado.WALKBY = res.WALKBY;
-                document.getElementById('status-walkby').innerText = "✅ Carregado";
+                document.getElementById('status-walkby').innerText = "✅ Salvo no Banco";
                 document.getElementById('status-walkby').style.color = "#34d399";
             }
             if (estado.WALKBY && !estado.MIZAR) selecionarModulo('WALKBY');
@@ -934,8 +1419,6 @@ HTML_TEMPLATE = """
         document.getElementById('mod-MIZAR').className = 'module-btn' + (mod === 'MIZAR' ? ' active-mizar' : '');
         document.getElementById('mod-WALKBY').className = 'module-btn' + (mod === 'WALKBY' ? ' active-walkby' : '');
         document.getElementById('mod-COMPARATIVO').className = 'module-btn' + (mod === 'COMPARATIVO' ? ' active-comp' : '');
-
-        // Atualiza estilo das sub-abas
         atualizarBotoesSubAba();
         renderizarTudo();
     }
@@ -962,7 +1445,7 @@ HTML_TEMPLATE = """
     async function uploadBase() {
         const file = document.getElementById('file_base').files[0];
         if (!file) return;
-        showLoading(true, "Importando Dicionário Base, Unidade 251 e Frações Ideais...");
+        showLoading(true, "Atualizando e Travando Base Fixa Permanente no Banco de Dados...");
         let fd = new FormData();
         fd.append("file", file);
         try {
@@ -970,10 +1453,35 @@ HTML_TEMPLATE = """
             let res = await req.json();
             showLoading(false);
             if (res.error) alert("❌ Erro: " + res.error);
-            else alert("✅ " + res.message);
+            else {
+                document.getElementById('lbl-base-fixa').innerText = `🔒 Base Fixa Permanente Ativa (${res.qtd || 1576} Medidores)`;
+                alert("✅ " + res.message);
+            }
         } catch (e) {
             showLoading(false);
             alert("Erro na comunicação com o servidor.");
+        }
+    }
+
+    async function virarMesBaseFixa() {
+        const modoRef = estado.WALKBY ? 'WALKBY' : (estado.MIZAR ? 'MIZAR' : null);
+        if (!modoRef) return alert("Processe o mês atual primeiro antes de virar o ciclo!");
+        if (!confirm(`Deseja fixar as Leituras Atuais do fechamento ${modoRef} como as novas Leituras Anteriores na Base Fixa para o próximo mês?`)) return;
+
+        showLoading(true, "Virando o mês e gravando Leituras Atuais na Base Fixa...");
+        try {
+            let req = await fetch('/virar_mes', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ modo: modoRef })
+            });
+            let res = await req.json();
+            showLoading(false);
+            if (res.error) alert("❌ " + res.error);
+            else alert("✅ " + res.message);
+        } catch (e) {
+            showLoading(false);
+            alert("Erro ao virar o mês.");
         }
     }
 
@@ -982,14 +1490,11 @@ HTML_TEMPLATE = """
         const file = document.getElementById(inputId).files[0];
         if (!file) return;
 
-        showLoading(true, `Calculando Fechamento ${modo} (Cascata ADASA + Comercial + Rateio)...`);
+        showLoading(true, `Calculando Fechamento ${modo} com Base Fixa (Hidrômetro + Medidor + Rateio)...`);
         let fd = new FormData();
         fd.append("file", file);
         fd.append("modo", modo);
-        fd.append("caesb_res", document.getElementById('val_res').value);
-        fd.append("caesb_com", document.getElementById('val_com').value);
-        fd.append("m3_res", document.getElementById('m3_res').value);
-        fd.append("m3_com", document.getElementById('m3_com').value);
+        fd.append("dados_caesb", JSON.stringify(obterDadosCAESBFormulario()));
 
         try {
             let req = await fetch('/processar', { method: 'POST', body: fd });
@@ -998,6 +1503,7 @@ HTML_TEMPLATE = """
             if (res.error) return alert("❌ Erro: " + res.error);
 
             estado[modo] = res;
+            document.getElementById('lbl-base-fixa').innerText = `🔒 Base Fixa Permanente Ativa (${res.unidades_hidrometros.length} Medidores)`;
             if (modo === 'MIZAR') {
                 document.getElementById('status-mizar').innerText = "✅ Processado";
                 document.getElementById('status-mizar').style.color = "#38bdf8";
@@ -1026,8 +1532,8 @@ HTML_TEMPLATE = """
             document.getElementById('lbl-arr-com').innerText = "R$ 0,00";
             document.getElementById('lbl-deficit').innerText = "R$ 0,00";
             box.innerHTML = `<div style="padding:45px; text-align:center; color:#94a3b8;">
-                <h3>Módulo ${estado.moduloAtivo} ainda não carregado</h3>
-                <p>Clique no botão <b>Processar ${estado.moduloAtivo}</b> acima e selecione o arquivo correspondente.</p>
+                <h3>Módulo ${estado.moduloAtivo} pronto para leitura</h3>
+                <p>A Base Fixa já está ativa! Basta clicar no botão <b>Processar Leitura ${estado.moduloAtivo}</b> acima.</p>
             </div>`;
             return;
         }
@@ -1051,14 +1557,15 @@ HTML_TEMPLATE = """
 
     function renderizarAbaGeral(box, dadosModo) {
         const R = dadosModo.resumo;
+        const C = R.caesb_detalhes || obterDadosCAESBFormulario();
         const comRows = dadosModo.unidades_hidrometros.filter(x => x.TIPO === 'COMERCIAL' || x.TIPO === 'COMERCIAL_OMO');
 
         let htmlCom = comRows.map(c => `
             <tr>
                 <td style="text-align:left; font-weight:700;">${c.UNIDADE_RAW}</td>
                 <td>${c.UNIDADE}</td>
-                <td>${c.HIDROMETRO}</td>
-                <td>${c.MEDIDOR_VISUAL}</td>
+                <td><span class="hidro-badge">${c.HIDROMETRO}</span></td>
+                <td><span class="med-badge">${c.MEDIDOR_VISUAL}</span></td>
                 <td>${fmtNum(c.L_ANTERIOR)}</td>
                 <td>${fmtNum(c.VAL_ATU)}</td>
                 <td style="font-weight:800; color:#34d399;">${fmtNum(c.CONSUMO)} m³</td>
@@ -1071,7 +1578,28 @@ HTML_TEMPLATE = """
 
         box.innerHTML = `
             <div class="exec-section">
-                <div class="exec-title">1. RESUMO GERAL — UNIDADES RESIDENCIAIS E ÁREAS COMUNS (${R.modo})</div>
+                <div class="exec-title">1. COBRANÇA DA CAESB — RESIDENCIAL & RESUMO DO RATEIO (${R.modo})</div>
+                <table style="margin-bottom: 12px;">
+                    <thead>
+                        <tr>
+                            <th>Hidrômetro</th><th>Medidor</th><th>Data Ant.</th><th>Leit. Ant.</th>
+                            <th>Data Atual</th><th>Leit. Atual</th><th>Medido (m³)</th>
+                            <th>Fixa Água</th><th>Fixa Esgoto</th><th>Var. Água</th><th>Var. Esgoto</th><th>TOTAL FATURA CAESB</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr style="font-weight:700; font-size:13px;">
+                            <td><span class="hidro-badge">GERAL</span></td><td><span class="med-badge">EXTERNO</span></td>
+                            <td>${C.res_dt_ant || '03/09/2026'}</td><td>${fmtNum(C.res_l_ant || 411389)}</td>
+                            <td>${C.res_dt_atu || '06/10/2026'}</td><td>${fmtNum(C.res_l_atu || 416637)}</td>
+                            <td style="color:#34d399; font-weight:800;">${fmtNum(R.m3_caesb_res)} m³</td>
+                            <td>${fmtBRL(C.res_fixa_agua || 8715)}</td><td>${fmtBRL(C.res_fixa_esg || 8715)}</td>
+                            <td>${fmtBRL(C.res_var_agua || 22566.40)}</td><td>${fmtBRL(C.res_var_esg || 22566.40)}</td>
+                            <td style="color:#34d399; font-size:15px;">${fmtBRL(R.fatura_caesb_res)}</td>
+                        </tr>
+                    </tbody>
+                </table>
+
                 <table class="filterable-table">
                     <thead>
                         <tr>
@@ -1080,7 +1608,6 @@ HTML_TEMPLATE = """
                             <th>Tx. Leitura Unidades</th>
                             <th>Consumo Área Comum + OMO (R$)</th>
                             <th>Tx. Leitura Área Comum</th>
-                            <th>Fatura CAESB Geral</th>
                             <th>Despesa Total (CAESB + Leit.)</th>
                             <th>Arrecadação Unidades</th>
                             <th>Status CAESB</th>
@@ -1094,7 +1621,6 @@ HTML_TEMPLATE = """
                             <td>${fmtBRL(R.taxa_leitura_unidades)}</td>
                             <td>${fmtBRL(R.consumo_rs_comum)}</td>
                             <td>${fmtBRL(R.taxa_leitura_comum)}</td>
-                            <td>${fmtBRL(R.fatura_caesb_res)}</td>
                             <td style="color:#fbbf24;">${fmtBRL(R.despesa_total_condominio)}</td>
                             <td style="color:#34d399;">${fmtBRL(R.arrecadacao_unidades_base)}</td>
                             <td>${R.status_diferenca} (${fmtBRL(R.diferenca_caesb)})</td>
@@ -1105,25 +1631,25 @@ HTML_TEMPLATE = """
             </div>
 
             <div class="exec-section">
-                <div class="exec-title orange">2. RESUMO E MEMÓRIA DE CÁLCULO — UNIDADES COMERCIAIS (5 UNIDADES / 7 MEDIDORES)</div>
+                <div class="exec-title orange">2. COBRANÇA DA CAESB — COMERCIAL & RATEIO DAS 5 UNIDADES</div>
                 <table style="margin-bottom:12px;">
                     <thead>
                         <tr>
-                            <th>Fatura CAESB Comercial</th>
-                            <th>Consumo Externo CAESB</th>
-                            <th>Soma Consumo 5 Comércios</th>
-                            <th>Valor do m³ Comercial Calculado</th>
-                            <th>Taxa de Leitura (7 Medidores)</th>
-                            <th>Despesa Total Comercial</th>
+                            <th>Data Ant.</th><th>Leit. Ant.</th><th>Data Atual</th><th>Leit. Atual</th>
+                            <th>Medido CAESB</th><th>Fixa Água</th><th>Fixa Esgoto</th><th>Var. Água</th><th>Var. Esgoto</th>
+                            <th>Fatura Comercial</th><th>Consumo 5 Lojas</th><th>Valor m³ Comercial</th><th>Despesa Total Com.</th>
                         </tr>
                     </thead>
                     <tbody>
-                        <tr style="font-weight:700; font-size:14px;">
-                            <td>${fmtBRL(R.fatura_caesb_com)}</td>
+                        <tr style="font-weight:700; font-size:13px;">
+                            <td>${C.com_dt_ant || '03/09/2026'}</td><td>${fmtNum(C.com_l_ant || 1465)}</td>
+                            <td>${C.com_dt_atu || '06/10/2026'}</td><td>${fmtNum(C.com_l_atu || 1627)}</td>
                             <td>${fmtNum(R.m3_caesb_com)} m³</td>
+                            <td>${fmtBRL(C.com_fixa_agua || 30.51)}</td><td>${fmtBRL(C.com_fixa_esg || 30.51)}</td>
+                            <td>${fmtBRL(C.com_var_agua || 3195.76)}</td><td>${fmtBRL(C.com_var_esg || 3195.76)}</td>
+                            <td style="color:#fbbf24;">${fmtBRL(R.fatura_caesb_com)}</td>
                             <td style="color:#34d399;">${fmtNum(R.m3_comercial_5unid)} m³</td>
-                            <td style="color:#fbbf24; font-size:15px;">${fmtBRL(R.preco_m3_com)} / m³</td>
-                            <td>${fmtBRL(55.30)}</td>
+                            <td style="color:#fbbf24; font-size:14px;">${fmtBRL(R.preco_m3_com)} / m³</td>
                             <td style="color:#fbbf24;">${fmtBRL(R.arrecadacao_com_5unid)}</td>
                         </tr>
                     </tbody>
@@ -1132,7 +1658,7 @@ HTML_TEMPLATE = """
                 <table class="filterable-table">
                     <thead>
                         <tr>
-                            <th>Medidor / Loja</th><th>Grupo</th><th>Hidrômetro</th><th>Medidor</th>
+                            <th>Estabelecimento</th><th>Unidade</th><th>Hidrômetro</th><th>Medidor</th>
                             <th>L. Ant.</th><th>L. Atual</th><th>Consumo</th><th>Tarifa Variável</th>
                             <th>Tx. Leitura</th><th>Total Linha</th><th>Destinação Contábil</th>
                         </tr>
@@ -1154,10 +1680,12 @@ HTML_TEMPLATE = """
     function renderizarAbaUnidades(box, dadosModo) {
         let rows = dadosModo.unidades_hidrometros.map(r => `
             <tr>
+                <td>${r.BLOCO || '-'}</td>
+                <td>${r.ANDAR || '-'}</td>
                 <td style="font-weight:700;">${r.UNIDADE}</td>
                 <td>${badgeTipo(r.TIPO)}</td>
-                <td>${r.HIDROMETRO}</td>
-                <td>${r.MEDIDOR_VISUAL}</td>
+                <td><span class="hidro-badge">${r.HIDROMETRO}</span></td>
+                <td><span class="med-badge">${r.MEDIDOR_VISUAL}</span></td>
                 <td>${r.DATA_LEITURA}</td>
                 <td>${r.TIPO === 'SEM_MEDIDOR' ? '-' : fmtNum(r.L_ANTERIOR)}</td>
                 <td>${r.TIPO === 'SEM_MEDIDOR' ? '-' : fmtNum(r.VAL_ATU)}</td>
@@ -1167,9 +1695,9 @@ HTML_TEMPLATE = """
                 <td>${r.V_AGUA > 0 ? fmtBRL(r.V_AGUA) : 'R$ 0,00'}</td>
                 <td>${r.V_ESGOTO > 0 ? fmtBRL(r.V_ESGOTO) : '-'}</td>
                 <td style="font-weight:700;">${r.SUBTOTAL > 0 ? fmtBRL(r.SUBTOTAL) : '-'}</td>
-                <td>${r.VAL_RATEIO > 0 ? fmtBRL(r.VAL_RATEIO) : '-'}</td>
+                <td>${r.VAL_RATEIO !== 0 ? fmtBRL(r.VAL_RATEIO) : '-'}</td>
                 <td>${r.TAXA > 0 ? fmtBRL(r.TAXA) : '-'}</td>
-                <td style="font-weight:800; color:#fbbf24;">${r.TOTAL > 0 ? fmtBRL(r.TOTAL) : '-'}</td>
+                <td style="font-weight:800; color:#fbbf24;">${r.TOTAL !== 0 ? fmtBRL(r.TOTAL) : '-'}</td>
             </tr>
         `).join('');
 
@@ -1177,7 +1705,8 @@ HTML_TEMPLATE = """
             <table id="dataTable" class="filterable-table">
                 <thead>
                     <tr>
-                        <th>Unidade</th><th>Tipo</th><th>Hidrômetro</th><th>Medidor</th><th>Data Leit.</th>
+                        <th>Bloco</th><th>Andar</th><th>Unidade</th><th>Tipo</th>
+                        <th>Hidrômetro</th><th>Medidor</th><th>Data Leit.</th>
                         <th>L. Ant.</th><th>L. Atual</th><th>Consumo (m³)</th><th>Fixa Água</th><th>Fixa Esg.</th>
                         <th>Var. Água</th><th>Var. Esg.</th><th>Subtotal Unid.</th><th>Rateio Fração</th><th>Taxa</th><th>TOTAL UNID.</th>
                     </tr>
@@ -1191,15 +1720,17 @@ HTML_TEMPLATE = """
     function renderizarAbaCobranca(box, dadosModo) {
         let rows = dadosModo.cobranca_consolidada.map(r => `
             <tr>
-                <td>${r.BLOCO || '-'}</td>
-                <td>${r.ANDAR || '-'}</td>
-                <td style="font-weight:700;">${r.UNIDADE}</td>
+                <td style="font-weight:700; color:#38bdf8;">${r.BLOCO}</td>
+                <td>${r.ANDAR}</td>
+                <td style="font-weight:800;">${r.UNIDADE_CURTA}</td>
                 <td>${badgeTipo(r.TIPO)}</td>
+                <td><span class="hidro-badge">${r.HIDROMETROS}</span></td>
+                <td><span class="med-badge">${r.MEDIDORES}</span></td>
                 <td>${r.QTD_MED}</td>
                 <td>${(r.FRACAO * 100).toFixed(4)}%</td>
                 <td style="font-weight:700; color:#34d399;">${r.TIPO === 'SEM_MEDIDOR' ? '-' : fmtNum(r.CONSUMO) + ' m³'}</td>
-                <td>${fmtBRL(r.SUBTOTAL)}</td>
-                <td>${r.VAL_RATEIO > 0 ? fmtBRL(r.VAL_RATEIO) : 'R$ 0,00'}</td>
+                <td style="font-weight:700;">${fmtBRL(r.SUBTOTAL)}</td>
+                <td>${fmtBRL(r.VAL_RATEIO)}</td>
                 <td>${fmtBRL(r.TAXA)}</td>
                 <td style="font-weight:800; color:#fbbf24; font-size:14px;">${fmtBRL(r.TOTAL)}</td>
             </tr>
@@ -1207,12 +1738,13 @@ HTML_TEMPLATE = """
 
         box.innerHTML = `
             <div class="exec-title green" style="margin-bottom:12px;">
-                 LISTAGEM CONSOLIDADA POR UNIDADE PARA BOLETO / ADMINISTRADORA ÂNCORA (755 UNIDADES)
+                 LISTAGEM CONSOLIDADA POR UNIDADE (COM HIDRÔMETRO E MEDIDOR) — ADMINISTRADORA ÂNCORA (${dadosModo.cobranca_consolidada.length} UNIDADES)
             </div>
             <table id="dataTable" class="filterable-table">
                 <thead>
                     <tr>
-                        <th>Bloco</th><th>Andar</th><th>Unidade</th><th>Categoria</th><th>Qtd Hidrômetros</th>
+                        <th>Bloco</th><th>Andar</th><th>Unidade</th><th>Categoria</th>
+                        <th>Hidrômetro(s)</th><th>Medidor(es)</th><th>Qtd</th>
                         <th>Fração Ideal</th><th>Consumo Total</th><th>Soma Consumo (R$)</th>
                         <th>Fração Área Comum (R$)</th><th>Taxa Leitura</th><th>TOTAL A PAGAR</th>
                     </tr>
@@ -1229,8 +1761,8 @@ HTML_TEMPLATE = """
             <tr>
                 <td style="font-weight:700;">${a.UNIDADE}</td>
                 <td>${badgeTipo(a.TIPO)}</td>
-                <td>${a.HIDROMETRO}</td>
-                <td>${a.MEDIDOR}</td>
+                <td><span class="hidro-badge">${a.HIDROMETRO}</span></td>
+                <td><span class="med-badge">${a.MEDIDOR}</span></td>
                 <td>${a.DATA_LEITURA}</td>
                 <td>${fmtNum(a.L_ANTERIOR)}</td>
                 <td>${fmtNum(a.VAL_ATU)}</td>
@@ -1265,7 +1797,7 @@ HTML_TEMPLATE = """
         if (!estado.MIZAR || !estado.WALKBY) {
             box.innerHTML = `<div style="padding:45px; text-align:center; color:#94a3b8;">
                 <h3>⚖️ Comparativo Mizar vs. Walk-by</h3>
-                <p>Para visualizar o confronto lado a lado, carregue os dois arquivos: <b>2. Processar MIZAR</b> e <b>3. Processar WALK-BY</b>.</p>
+                <p>Para visualizar o confronto lado a lado, processe os dois arquivos: <b>1. Processar MIZAR</b> e <b>2. Processar WALK-BY</b>.</p>
             </div>`;
             return;
         }
@@ -1292,8 +1824,11 @@ HTML_TEMPLATE = """
             const diffTotal = uw.TOTAL - um.TOTAL;
             return `
                 <tr>
-                    <td style="font-weight:700;">${uw.UNIDADE}</td>
-                    <td>${badgeTipo(uw.TIPO)}</td>
+                    <td>${uw.BLOCO}</td>
+                    <td>${uw.ANDAR}</td>
+                    <td style="font-weight:700;">${uw.UNIDADE_CURTA}</td>
+                    <td><span class="hidro-badge">${uw.HIDROMETROS}</span></td>
+                    <td><span class="med-badge">${uw.MEDIDORES}</span></td>
                     <td style="color:#60a5fa;">${fmtNum(um.CONSUMO)} m³</td>
                     <td>${fmtBRL(um.SUBTOTAL)}</td>
                     <td>${fmtBRL(um.VAL_RATEIO)}</td>
@@ -1348,13 +1883,13 @@ HTML_TEMPLATE = """
                     </tbody>
                 </table>
 
-                <div class="exec-title green">COMPARATIVO UNIDADE POR UNIDADE (755 UNIDADES)</div>
+                <div class="exec-title green">COMPARATIVO UNIDADE POR UNIDADE COM HIDRÔMETRO E MEDIDOR (${estado.WALKBY.cobranca_consolidada.length} UNIDADES)</div>
                 <table id="dataTable" class="filterable-table">
                     <thead>
                         <tr>
-                            <th>Unidade</th><th>Tipo</th>
-                            <th>Mizar (m³)</th><th>Mizar Cons. (R$)</th><th>Mizar Rateio</th><th>MIZAR TOTAL</th>
-                            <th>Walk-by (m³)</th><th>Walk-by Cons. (R$)</th><th>Walk-by Rateio</th><th>WALK-BY TOTAL</th>
+                            <th>Bloco</th><th>Andar</th><th>Unid.</th><th>Hidrômetro(s)</th><th>Medidor(es)</th>
+                            <th>Mizar (m³)</th><th>Mizar Cons.</th><th>Mizar Rateio</th><th>MIZAR TOTAL</th>
+                            <th>Walk-by (m³)</th><th>Walk-by Cons.</th><th>Walk-by Rateio</th><th>WALK-BY TOTAL</th>
                             <th>Dif. Volume</th><th>Dif. Financeira</th>
                         </tr>
                     </thead>
@@ -1387,19 +1922,15 @@ HTML_TEMPLATE = """
             const D = estado[modo];
             const pref = modo.toLowerCase();
 
-            // 1. Aba Geral
             const wsGeral = XLSX.utils.json_to_sheet([D.resumo]);
             XLSX.utils.book_append_sheet(wb, wsGeral, `${pref} geral`);
 
-            // 2. Aba Unidades (1576 linhas)
             const wsUnds = XLSX.utils.json_to_sheet(D.unidades_hidrometros);
             XLSX.utils.book_append_sheet(wb, wsUnds, `${pref} unds`);
 
-            // 3. Aba Cobrança Consolidada (755 unidades)
             const wsCob = XLSX.utils.json_to_sheet(D.cobranca_consolidada);
             XLSX.utils.book_append_sheet(wb, wsCob, `${pref} cobrança`);
 
-            // 4. Aba Alarmes
             const wsAlm = XLSX.utils.json_to_sheet(D.alarmes_lista);
             XLSX.utils.book_append_sheet(wb, wsAlm, `${pref} alarmes`);
         });
@@ -1414,6 +1945,7 @@ HTML_TEMPLATE = """
         if (!D) return alert("Processe os dados primeiro antes de gerar o PDF!");
 
         const R = D.resumo;
+        const C = R.caesb_detalhes || obterDadosCAESBFormulario();
         const { jsPDF } = window.jspdf;
         const doc = new jsPDF('p', 'mm', 'a4');
 
@@ -1428,14 +1960,27 @@ HTML_TEMPLATE = """
         doc.text("Apuração Oficial ADASA nº 70/2026 | Residencial, Comercial Rateado e Áreas Comuns", 105, 18, { align: "center" });
         doc.text("Emitido em: " + new Date().toLocaleString('pt-BR'), 105, 24, { align: "center" });
 
-        let y = 35;
+        let y = 34;
         doc.setTextColor(0, 0, 0);
         doc.setFontSize(10);
         doc.setFont("helvetica", "bold");
-        doc.text("1. FECHAMENTO FINANCEIRO RESIDENCIAL E RATEIO DE ÁREA COMUM", 14, y);
+        doc.text("1. DADOS DA FATURA CAESB RESIDENCIAL E FECHAMENTO DO RATEIO", 14, y);
 
         doc.autoTable({
             startY: y + 3,
+            head: [['Leit. Ant. (' + (C.res_dt_ant || '03/09') + ')', 'Leit. Atual (' + (C.res_dt_atu || '06/10') + ')', 'Medido (m³)', 'Fixa Água/Esg.', 'Var. Água/Esg.', 'TOTAL CAESB']],
+            body: [[
+                fmtNum(C.res_l_ant || 411389), fmtNum(C.res_l_atu || 416637), fmtNum(R.m3_caesb_res) + ' m³',
+                fmtBRL((C.res_fixa_agua || 8715) * 2), fmtBRL((C.res_var_agua || 22566.40) * 2), fmtBRL(R.fatura_caesb_res)
+            ]],
+            theme: 'grid',
+            headStyles: { fillColor: [16, 185, 129], halign: 'center' },
+            bodyStyles: { halign: 'center', fontStyle: 'bold' }
+        });
+
+        y = doc.lastAutoTable.finalY + 5;
+        doc.autoTable({
+            startY: y,
             head: [['Indicador Financeiro', 'Volume / Base', 'Valor Apurado (R$)']],
             body: [
                 ['Fatura CAESB Geral (Hidrômetro Externo)', fmtNum(R.m3_caesb_res) + ' m³', fmtBRL(R.fatura_caesb_res)],
@@ -1450,29 +1995,29 @@ HTML_TEMPLATE = """
             columnStyles: { 2: { halign: 'right', fontStyle: 'bold' } }
         });
 
-        y = doc.lastAutoTable.finalY + 10;
-        doc.text("2. DEMONSTRATIVO DO SETOR COMERCIAL (RATEIO DIRETO DA CONTA COMERCIAL)", 14, y);
+        y = doc.lastAutoTable.finalY + 9;
+        doc.text("2. DEMONSTRATIVO DO SETOR COMERCIAL (COM HIDRÔMETRO E MEDIDOR)", 14, y);
 
         const comRows = D.unidades_hidrometros.filter(x => x.TIPO === 'COMERCIAL' || x.TIPO === 'COMERCIAL_OMO');
         doc.autoTable({
             startY: y + 3,
-            head: [['Unidade Comercial', 'Medidor', 'L. Ant.', 'L. Atual', 'Consumo', 'Valor Água', 'Tx. Leitura', 'Total (R$)']],
+            head: [['Unidade Comercial', 'Hidrômetro', 'Medidor', 'L. Ant.', 'L. Atual', 'Consumo', 'Valor Água', 'Tx. Leit.', 'Total (R$)']],
             body: comRows.map(c => [
-                c.UNIDADE_RAW, c.MEDIDOR_VISUAL, fmtNum(c.L_ANTERIOR), fmtNum(c.VAL_ATU),
+                c.UNIDADE_RAW, c.HIDROMETRO, c.MEDIDOR_VISUAL, fmtNum(c.L_ANTERIOR), fmtNum(c.VAL_ATU),
                 fmtNum(c.CONSUMO) + ' m³', fmtBRL(c.V_AGUA), fmtBRL(c.TAXA), fmtBRL(c.V_AGUA + c.TAXA)
             ]),
             theme: 'striped',
             headStyles: { fillColor: [217, 119, 6] },
-            columnStyles: { 5: { halign: 'right' }, 6: { halign: 'right' }, 7: { halign: 'right', fontStyle: 'bold' } }
+            columnStyles: { 6: { halign: 'right' }, 7: { halign: 'right' }, 8: { halign: 'right', fontStyle: 'bold' } }
         });
 
-        y = doc.lastAutoTable.finalY + 10;
+        y = doc.lastAutoTable.finalY + 9;
         doc.text("3. AUDITORIA DE ALARMES E ANOMALIAS TÉCNICAS", 14, y);
-        const C = R.contagem_alarmes;
+        const A = R.contagem_alarmes;
         doc.autoTable({
             startY: y + 3,
             head: [['Medidor Bloqueado', 'Vazamento', 'Sub-vazão', 'Fluxo Reverso', 'Desmontagem', 'Sem Transmissão']],
-            body: [[C.bloqueado, C.vazamento, C.subvazao, C.retorno, C.desmontagem, C.sem_transmissao]],
+            body: [[A.bloqueado, A.vazamento, A.subvazao, A.retorno, A.desmontagem, A.sem_transmissao]],
             theme: 'grid',
             headStyles: { fillColor: [220, 38, 38], halign: 'center' },
             bodyStyles: { halign: 'center', fontStyle: 'bold' }
@@ -1485,6 +2030,7 @@ HTML_TEMPLATE = """
 </html>
 """
 
+
 # ==============================================================================
 # ROTAS FLASK BACKEND
 # ==============================================================================
@@ -1494,13 +2040,23 @@ def index():
 
 @app.route('/estado_inicial', methods=['GET'])
 def estado_inicial():
-    out = {}
+    out = {'qtd_base_fixa': MedidorBaseV4.query.count()}
     for ch in ['MIZAR', 'WALKBY']:
-        reg = EstadoCalculoV3.query.filter_by(chave=ch).first()
+        reg = EstadoCalculoV4.query.filter_by(chave=ch).first()
         if reg and reg.dados_json:
             try: out[ch] = json.loads(reg.dados_json)
             except: pass
     return jsonify(out)
+
+@app.route('/parse_conta_caesb', methods=['POST'])
+def parse_conta_caesb():
+    try:
+        dados = request.get_json(force=True) or {}
+        texto = dados.get('texto', '')
+        resultado = MotorFaturamento.extrair_dados_conta_caesb_texto(texto)
+        return jsonify(resultado)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/upload_base', methods=['POST'])
 def upload_base():
@@ -1509,100 +2065,38 @@ def upload_base():
     f = request.files['file']
     try:
         info = MotorFaturamento.ler_planilha_ou_txt(f.read(), f.filename)
-        tipo_arq = info['tipo_arquivo']
-        df = info['df']
+        adicionados = MotorFaturamento.importar_ou_atualizar_base_fixa(info)
+        return jsonify({
+            "qtd": adicionados,
+            "message": f"Base Fixa Permanente gravada com sucesso! {adicionados} registros travados no banco de dados."
+        })
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": str(e)}), 500
 
-        MedidorBaseV3.query.delete()
-        adicionados = 0
-        tem_251 = False
+@app.route('/virar_mes', methods=['POST'])
+def virar_mes():
+    try:
+        dados = request.get_json(force=True) or {}
+        modo = dados.get('modo', 'WALKBY')
+        reg = EstadoCalculoV4.query.filter_by(chave=modo).first()
+        if not reg or not reg.dados_json:
+            return jsonify({"error": "Nenhum fechamento processado para virar o mês."}), 400
 
-        if tipo_arq == 'PLANILHA_MESTRA_COBRANCA':
-            # Extrai diretamente das linhas 57 a 1633 da aba COBRANÇA oficial
-            for idx in range(56, len(df)):
-                row = df.iloc[idx]
-                bloco = str(row[0]).strip() if pd.notna(row[0]) else ""
-                andar = str(row[1]).strip() if pd.notna(row[1]) else ""
-                unid_col = str(row[2]).strip() if pd.notna(row[2]) else ""
-                hidro = str(row[3]).strip() if pd.notna(row[3]) else ""
-                med_vis = str(row[4]).strip().split('.')[0] if pd.notna(row[4]) else ""
+        fechamento = json.loads(reg.dados_json)
+        mapa_atu = {str(x['MEDIDOR_DNA']): float(x['VAL_ATU']) for x in fechamento.get('unidades_hidrometros', [])}
 
-                if not unid_col or unid_col.upper() in ['NAN', 'NONE', 'UNIDADE', 'TOTAL']:
-                    continue
-
-                dna = MotorFaturamento.limpar_id_medidor(med_vis)
-                unid_grupo = MotorFaturamento.normalizar_unidade_grupo(unid_col, bloco, andar)
-                ordem_num = adicionados + 1
-                tipo_unid = MotorFaturamento.classificar_tipo(unid_grupo, med_vis, ordem_num)
-
-                if tipo_unid == 'SEM_MEDIDOR':
-                    tem_251 = True
-                    dna = f"SEM_MED_251_{ordem_num}"
-                    taxa_val = 0.0
-                else:
-                    if not dna or dna == '-': continue
-                    taxa_val = 7.90
-
-                if MedidorBaseV3.query.filter_by(medidor_dna=dna).first():
-                    continue
-
-                dt_ant = str(row[5]).strip().split(' ')[0] if pd.notna(row[5]) else "04/09/2026"
-                l_ant = MotorFaturamento.limpar_num(row[6], 0.0)
-                frac = MotorFaturamento.limpar_num(row[20], 0.0)
-
-                db.session.add(MedidorBaseV3(
-                    ordem=ordem_num, bloco=bloco, andar=andar,
-                    unidade=unid_grupo, unidade_raw=unid_col, tipo=tipo_unid,
-                    hidrometro=hidro, medidor_visual=med_vis, medidor_dna=dna,
-                    fracao=frac, taxa=taxa_val, l_anterior=l_ant, data_anterior=dt_ant
-                ))
-                adicionados += 1
-
-        else:
-            # Tabela simples (brisas.xlsx ou walkby.txt usado como base)
-            df.columns = [MotorFaturamento.limpa_nome_coluna(c) for c in df.columns]
-            col_uni = next((c for c in df.columns if 'LOCAL' in c or 'UNIDADE' in c), None)
-            col_med = next((c for c in df.columns if 'MEDIDOR' in c), None)
-            col_hid = next((c for c in df.columns if 'TIPO' in c or 'DESCRICAO' in c or 'HIDRO' in c), None)
-            col_ant = next((c for c in df.columns if 'ANTIGO' in c or 'ANTERIOR' in c or 'INDICE' in c), None)
-
-            if not col_uni or not col_med:
-                return jsonify({"error": "Colunas de Localização/Unidade e Medidor não encontradas."}), 400
-
-            for idx, r in df.iterrows():
-                unid_raw = str(r[col_uni]).strip()
-                med_vis = str(r[col_med]).strip().split('.')[0]
-                dna = MotorFaturamento.limpar_id_medidor(med_vis)
-                if not dna or dna == '-': continue
-                if MedidorBaseV3.query.filter_by(medidor_dna=dna).first(): continue
-
-                adicionados += 1
-                unid_grupo = MotorFaturamento.normalizar_unidade_grupo(unid_raw)
-                tipo_unid = MotorFaturamento.classificar_tipo(unid_grupo, med_vis, adicionados)
-                l_ant = MotorFaturamento.limpar_num(r[col_ant], 0.0) if col_ant else 0.0
-                hidro = str(r[col_hid]).strip() if col_hid and pd.notna(r[col_hid]) else ""
-
-                # Fração padrão aproximada caso o arquivo simples não contenha a coluna U de fração
-                frac_default = 0.002411 if tipo_unid == 'EMPORIO' else (0.994838 / 749.0 if tipo_unid == 'RESIDENCIAL' else 0.0)
-
-                db.session.add(MedidorBaseV3(
-                    ordem=adicionados, bloco="", andar="",
-                    unidade=unid_grupo, unidade_raw=unid_raw, tipo=tipo_unid,
-                    hidrometro=hidro, medidor_visual=med_vis, medidor_dna=dna,
-                    fracao=frac_default, taxa=7.90, l_anterior=l_ant
-                ))
-
-        # Garante que a Unidade B - 2º - 251 (Sem Medidor) esteja sempre presente!
-        if not tem_251:
-            db.session.add(MedidorBaseV3(
-                ordem=569, bloco="B", andar="2º",
-                unidade="B - 2º - 251", unidade_raw="B - 251", tipo="SEM_MEDIDOR",
-                hidrometro="-", medidor_visual="-", medidor_dna="SEM_MED_251_1",
-                fracao=0.002751, taxa=0.0, l_anterior=0.0, data_anterior="-"
-            ))
-            adicionados += 1
-
+        atualizados = 0
+        for m in MedidorBaseV4.query.all():
+            if m.medidor_dna in mapa_atu and m.tipo != 'SEM_MEDIDOR':
+                novo_val = mapa_atu[m.medidor_dna]
+                # Se houve virada de relógio (1000002 -> 2), guarda o valor real do mostrador
+                if novo_val >= 1000000:
+                    novo_val = novo_val - 1000000
+                m.l_anterior = novo_val
+                atualizados += 1
         db.session.commit()
-        return jsonify({"message": f"Base Oficial carregada com sucesso! {adicionados} registros configurados (incluindo regra especial da Unidade 251 e Empório)."})
+        return jsonify({"message": f"Ciclo virado com sucesso! {atualizados} leituras atuais foram fixadas como Leitura Anterior para o próximo mês."})
     except Exception as e:
         db.session.rollback()
         return jsonify({"error": str(e)}), 500
@@ -1613,25 +2107,20 @@ def processar():
         return jsonify({"error": "Arquivo de leitura não enviado."}), 400
     f = request.files['file']
     modo = request.form.get('modo', 'WALKBY').upper()
-    val_res = MotorFaturamento.limpar_num(request.form.get('caesb_res', 62562.80), 62562.80)
-    val_com = MotorFaturamento.limpar_num(request.form.get('caesb_com', 6452.54), 6452.54)
-    m3_res = MotorFaturamento.limpar_num(request.form.get('m3_res', 5248), 5248)
-    m3_com = MotorFaturamento.limpar_num(request.form.get('m3_com', 162), 162)
+    try:
+        dados_caesb = json.loads(request.form.get('dados_caesb', '{}'))
+    except:
+        dados_caesb = {}
 
     try:
         info = MotorFaturamento.ler_planilha_ou_txt(f.read(), f.filename)
-        df_mes = info['df']
-
         resultado = MotorFaturamento.executar_fechamento(
-            df_mes=df_mes, modo_leitura=modo,
-            val_caesb_res=val_res, val_caesb_com=val_com,
-            m3_caesb_res=m3_res, m3_caesb_com=m3_com
+            info_arq=info, modo_leitura=modo, dados_caesb=dados_caesb
         )
 
-        # Salva estado no banco para persistência entre reloads
-        reg = EstadoCalculoV3.query.filter_by(chave=modo).first()
+        reg = EstadoCalculoV4.query.filter_by(chave=modo).first()
         if not reg:
-            reg = EstadoCalculoV3(chave=modo, dados_json=json.dumps(resultado))
+            reg = EstadoCalculoV4(chave=modo, dados_json=json.dumps(resultado))
             db.session.add(reg)
         else:
             reg.dados_json = json.dumps(resultado)
