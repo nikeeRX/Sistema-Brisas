@@ -147,7 +147,7 @@ class MotorFaturamento:
     @staticmethod
     def limpar_num(val, default=0.0):
         if pd.isna(val) or val is None: return default
-        s = str(val).replace('"', '').replace("'", '').replace('R$', '').strip()
+        s = str(val).replace('"', '').replace("'", '').replace('R$', '').replace('%', '').strip()
         if s.upper() in ['', '-', 'NAN', 'NONE', 'NULL']: return default
         if ',' in s and '.' in s:
             if s.find('.') < s.find(','):
@@ -166,11 +166,8 @@ class MotorFaturamento:
 
     @staticmethod
     def inicializar_base_padrao_se_vazia():
-        """Garante que a Base Fixa NUNCA fique vazia ao abrir o sistema"""
         if MedidorBaseV4.query.count() > 0:
             return
-
-        # 1. Tenta resgatar automaticamente dados de tabelas anteriores no mesmo banco Railway
         try:
             res = db.session.execute(text("SELECT unidade, medidor_visual, medidor_dna, fracao, taxa, l_anterior FROM medidor_base_v3")).fetchall()
             if res and len(res) > 10:
@@ -190,7 +187,6 @@ class MotorFaturamento:
         except Exception:
             db.session.rollback()
 
-        # 2. Semeia a estrutura mestre inicial do Brisas do Lago para exibição imediata das colunas
         seed_inicial = [
             (1, "-", "-", "EMPÓRIO", "EMPÓRIO", "EMPORIO", "EMPORIO", "A23B182990", "23419692", "23419692", 0.002411, 7.90, 130),
             (2, "-", "-", "RESTAURANTE", "RESTAURANTE", "RESTAURANTE", "COMERCIAL", "A23B183018", "23712149", "23712149", 0.0, 7.90, 1330),
@@ -219,7 +215,6 @@ class MotorFaturamento:
 
     @staticmethod
     def obter_preview_base_fixa():
-        """Retorna as linhas da Base Fixa para exibir a tabela imediatamente ao abrir o site"""
         MotorFaturamento.inicializar_base_padrao_se_vazia()
         medidores = MedidorBaseV4.query.order_by(MedidorBaseV4.ordem, MedidorBaseV4.id).all()
         rows = []
@@ -334,10 +329,10 @@ class MotorFaturamento:
                 df_u = pd.read_excel(xls, sheet_name=aba_unds, header=None)
                 return {'tipo_arquivo': 'PLANILHA_9ABAS_UNDS', 'df': df_u}
 
-            # 3. Aba LEITURA ou planilha simples
+            # 3. Aba LEITURA ou planilha Base Brisas
             aba_leit = next((s for s in xls.sheet_names if 'LEITURA' in MotorFaturamento.remover_acentos(s)), None)
             if aba_leit:
-                df_l = pd.read_excel(xls, sheet_name=aba_leit)
+                df_l = pd.read_excel(xls, sheet_name=aba_leit, dtype=str)
                 return {'tipo_arquivo': 'TABELA_SIMPLES', 'df': df_l}
 
             df = pd.read_excel(xls, dtype=str)
@@ -368,18 +363,23 @@ class MotorFaturamento:
         return {'tipo_arquivo': 'TABELA_SIMPLES', 'df': df}
 
     @staticmethod
-    def importar_ou_atualizar_base_fixa(info):
-        """Grava todos os 1.576 medidores em memória e faz 1 único Bulk Insert no banco (< 0.2s)"""
+    def importar_ou_atualizar_base_fixa(info, preservar_leituras_existentes=False):
+        """Grava todos os 1.576 medidores (incluindo B - 2º - 251) em lote (< 0.2s)"""
         tipo_arq = info['tipo_arquivo']
         df = info['df']
 
-        # Guarda frações ideais já existentes no banco para não perder se o usuário subir um TXT/CSV simples
         fracoes_existentes = {}
+        leituras_ant_existentes = {}
+        hidros_existentes = {}
         try:
             for m_old in MedidorBaseV4.query.all():
                 if m_old.fracao and m_old.fracao > 0:
                     fracoes_existentes[m_old.unidade] = m_old.fracao
                     fracoes_existentes[m_old.medidor_dna] = m_old.fracao
+                if m_old.l_anterior and m_old.l_anterior > 0:
+                    leituras_ant_existentes[m_old.medidor_dna] = m_old.l_anterior
+                if m_old.hidrometro and m_old.hidrometro not in ['', '-']:
+                    hidros_existentes[m_old.medidor_dna] = m_old.hidrometro
         except Exception:
             db.session.rollback()
 
@@ -437,7 +437,16 @@ class MotorFaturamento:
                 ))
         else:
             df_copy = df.copy()
-            # Evita colunas duplicadas que quebram o Pandas
+            # Se a planilha simples tiver linhas de título antes do cabeçalho real (ex: aba LEITURA), localiza a linha do cabeçalho
+            first_cols_str = " ".join([str(c).upper() for c in df_copy.columns])
+            if 'MEDIDOR' not in first_cols_str and 'LOCAL' not in first_cols_str and 'UNIDADE' not in first_cols_str:
+                for r_idx in range(min(15, len(df_copy))):
+                    vals_str = " ".join([str(v).upper() for v in df_copy.iloc[r_idx].values if pd.notna(v)])
+                    if 'MEDIDOR' in vals_str and ('LOCAL' in vals_str or 'UNIDADE' in vals_str):
+                        df_copy.columns = [str(v).strip() if pd.notna(v) else f"COL_{i}" for i, v in enumerate(df_copy.iloc[r_idx].values)]
+                        df_copy = df_copy.iloc[r_idx+1:].reset_index(drop=True)
+                        break
+
             cols_limpas = []
             for i, c in enumerate(df_copy.columns):
                 cl = MotorFaturamento.limpa_nome_coluna(c)
@@ -446,43 +455,71 @@ class MotorFaturamento:
                 cols_limpas.append(cl)
             df_copy.columns = cols_limpas
 
+            col_bloco = next((c for c in df_copy.columns if 'BLOCO' in c), None)
+            col_andar = next((c for c in df_copy.columns if 'ANDAR' in c), None)
             col_uni = next((c for c in df_copy.columns if 'LOCAL' in c or 'UNIDADE' in c), None)
             col_med = next((c for c in df_copy.columns if 'MEDIDOR' in c), None)
             col_hid = next((c for c in df_copy.columns if c in ['TIPO', 'DESCRICAO', 'HIDROMETRO'] or 'HIDRO' in c or 'DESCRIC' in c), None)
+            col_frac = next((c for c in df_copy.columns if 'FRAC' in c), None)
             col_ant = next((c for c in df_copy.columns if 'ANTIGO' in c or 'ANTERIOR' in c), None)
-            if not col_ant:
+            if not col_ant and not preservar_leituras_existentes:
                 col_ant = next((c for c in df_copy.columns if 'INDICE' in c or 'LEITURA' in c), None)
 
             if not col_uni or not col_med:
-                raise ValueError(f"Colunas de Unidade/Medidor não encontradas. Colunas lidas: {list(df.columns)[:6]}")
+                raise ValueError(f"Colunas de Unidade/Medidor não encontradas na planilha. Colunas lidas: {list(df.columns)[:6]}")
+
+            # Verifica se a coluna de fração está em percentual (0 a 100) ou decimal (0 a 1)
+            fator_frac = 1.0
+            if col_frac:
+                soma_f = sum(MotorFaturamento.limpar_num(v, 0.0) for v in df_copy[col_frac].values)
+                if soma_f > 10.0:
+                    fator_frac = 0.01
 
             for idx, r in df_copy.iterrows():
-                unid_raw = str(r[col_uni]).strip()
-                med_vis = str(r[col_med]).strip().split('.')[0]
-                dna = MotorFaturamento.limpar_id_medidor(med_vis)
-                if not dna or dna == '-': continue
+                unid_raw = str(r[col_uni]).strip() if pd.notna(r[col_uni]) else ""
+                med_vis = str(r[col_med]).strip().split('.')[0] if pd.notna(r[col_med]) else ""
+                if not unid_raw or unid_raw.upper() in ['NAN', 'NONE', 'TOTAL']:
+                    continue
+
+                bloco_val = str(r[col_bloco]).strip() if col_bloco and pd.notna(r[col_bloco]) else ""
+                andar_val = str(r[col_andar]).strip() if col_andar and pd.notna(r[col_andar]) else ""
+                b_ext, a_ext, unid_grupo, unid_curta = MotorFaturamento.extrair_bloco_andar_unid(unid_raw, bloco_val, andar_val)
+                ordem_num = len(novos_objetos) + 1
+                tipo_unid = MotorFaturamento.classificar_tipo(unid_grupo, med_vis, ordem_num)
+
+                if tipo_unid == 'SEM_MEDIDOR':
+                    tem_251 = True
+                    dna = f"SEM_MED_251_{ordem_num}"
+                    taxa_val = 0.0
+                else:
+                    dna = MotorFaturamento.limpar_id_medidor(med_vis)
+                    if not dna or dna == '-': continue
+                    taxa_val = 7.90
+
                 if dna in dnas_vistos: continue
                 dnas_vistos.add(dna)
 
-                ordem_num = len(novos_objetos) + 1
-                b_ext, a_ext, unid_grupo, unid_curta = MotorFaturamento.extrair_bloco_andar_unid(unid_raw)
-                tipo_unid = MotorFaturamento.classificar_tipo(unid_grupo, med_vis, ordem_num)
-                l_ant = MotorFaturamento.limpar_num(r[col_ant], 0.0) if col_ant else 0.0
-                hidro = str(r[col_hid]).strip() if col_hid and pd.notna(r[col_hid]) and str(r[col_hid]).strip().upper() not in ['NAN', 'NONE', ''] else "-"
+                l_ant = MotorFaturamento.limpar_num(r[col_ant], 0.0) if col_ant else leituras_ant_existentes.get(dna, 0.0)
+                hidro = str(r[col_hid]).strip() if col_hid and pd.notna(r[col_hid]) and str(r[col_hid]).strip().upper() not in ['NAN', 'NONE', ''] else hidros_existentes.get(dna, "-")
 
-                frac_salva = fracoes_existentes.get(dna) or fracoes_existentes.get(unid_grupo)
-                if frac_salva and frac_salva > 0:
-                    frac_final = frac_salva
+                frac_lida = (MotorFaturamento.limpar_num(r[col_frac], 0.0) * fator_frac) if col_frac else 0.0
+                if frac_lida > 0:
+                    frac_final = frac_lida
                 else:
-                    frac_final = 0.002411 if tipo_unid == 'EMPORIO' else (0.994838 / 749.0 if tipo_unid == 'RESIDENCIAL' else 0.0)
+                    frac_salva = fracoes_existentes.get(dna) or fracoes_existentes.get(unid_grupo)
+                    if frac_salva and frac_salva > 0:
+                        frac_final = frac_salva
+                    else:
+                        frac_final = 0.002411 if tipo_unid == 'EMPORIO' else (0.994838 / 749.0 if tipo_unid == 'RESIDENCIAL' else 0.0)
 
                 novos_objetos.append(MedidorBaseV4(
                     ordem=ordem_num, bloco=b_ext, andar=a_ext,
                     unidade=unid_grupo, unidade_curta=unid_curta, unidade_raw=unid_raw, tipo=tipo_unid,
                     hidrometro=hidro, medidor_visual=med_vis, medidor_dna=dna,
-                    fracao=frac_final, taxa=7.90, l_anterior=l_ant
+                    fracao=frac_final, taxa=taxa_val, l_anterior=l_ant
                 ))
 
+        # INJEÇÃO AUTOMÁTICA DA UNIDADE B - 2º - 251 SE ELA NÃO ESTIVER NA BASE BRISAS!
         if not tem_251:
             novos_objetos.append(MedidorBaseV4(
                 ordem=569, bloco="B", andar="2º",
@@ -502,10 +539,12 @@ class MotorFaturamento:
         m3_caesb_res = float(dados_caesb.get('m3_res', 5248))
         m3_caesb_com = float(dados_caesb.get('m3_com', 162))
 
-        # Se a Base Fixa ainda tiver poucos registros (apenas o seed inicial) ou se o usuário subiu uma Planilha Oficial, atualiza a Base Fixa automaticamente!
         medidores_count = MedidorBaseV4.query.count()
         if medidores_count < 100 or info_arq['tipo_arquivo'] in ['PLANILHA_6ABAS_COBRANCA', 'PLANILHA_9ABAS_UNDS']:
-            MotorFaturamento.importar_ou_atualizar_base_fixa(info_arq)
+            MotorFaturamento.importar_ou_atualizar_base_fixa(
+                info_arq,
+                preservar_leituras_existentes=(modo_leitura == 'MIZAR' and info_arq['tipo_arquivo'] == 'TABELA_SIMPLES')
+            )
 
         medidores_db = MedidorBaseV4.query.order_by(MedidorBaseV4.ordem, MedidorBaseV4.id).all()
 
@@ -528,7 +567,6 @@ class MotorFaturamento:
         else:
             df_mes = info_arq['df'].copy()
 
-        # Limpeza segura de nomes de colunas
         cols_orig = list(df_mes.columns)
         cols_clean = {}
         for c in cols_orig:
@@ -536,7 +574,6 @@ class MotorFaturamento:
             if cl and cl not in cols_clean:
                 cols_clean[cl] = c
 
-        # Busca flexível por substring (resolve N°. do medidor -> NODOMEDIDOR)
         col_ordem = next((cols_clean[k] for k in cols_clean if 'ORDEM' in k), None)
         col_loc = next((cols_clean[k] for k in cols_clean if 'LOCAL' in k or 'UNIDADE' in k), None)
         col_hid = next((cols_clean[k] for k in cols_clean if k in ['TIPO', 'DESCRICAO', 'HIDROMETRO'] or 'HIDRO' in k or 'DESCRIC' in k), None)
@@ -594,7 +631,6 @@ class MotorFaturamento:
                 'alarmes': alm
             }
 
-        # Atualiza Hidrômetros e Leituras Anteriores em lote se vierem no arquivo
         atualizou_db = False
         with db.session.no_autoflush:
             for m_obj in medidores_db:
@@ -641,7 +677,6 @@ class MotorFaturamento:
                 dt_atu_final = "N/A"
                 alm_final = {'impossivel':0,'desmontagem':0,'vazamento':0,'fraude':0,'bloqueado':0,'subvazao':0,'retorno':0,'sem_transmissao':1}
 
-            # Virada de Relógio (Ex: D - 1º - 139, medidor 23003778: 999995 -> 2 = 7 m³)
             if l_ant_final >= 999900 and l_atu_final < 1000:
                 if modo_leitura == 'MIZAR' and l_atu_final == 0:
                     l_atu_exib = 1000000
@@ -851,9 +886,9 @@ with app.app_context():
 
 
 # ==============================================================================
-# INTERFACE WEB ENTERPRISE (TABELA E COLUNAS SEMPRE VISÍVEIS AO ABRIR)
+# INTERFACE WEB ENTERPRISE (RAW STRING r""" PARA BLINDAR O JAVASCRIPT)
 # ==============================================================================
-HTML_TEMPLATE = """
+HTML_TEMPLATE = r"""
 <!DOCTYPE html>
 <html lang="pt-BR">
 <head>
@@ -1349,11 +1384,11 @@ HTML_TEMPLATE = """
         <!-- BOTÕES PRINCIPAIS DE IMPORTAÇÃO E PROCESSAMENTO -->
         <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px; padding-top:10px; border-top:1px solid var(--panel-border);">
             <span style="font-size:12px; color:#34d399; font-weight:600;">
-                ✅ Você pode enviar a planilha ou TXT direto nos botões abaixo (gravação ultra-rápida em 0,2s no banco):
+                ✅ A Unidade B - 2º - 251 (sem medidor) é inserida automaticamente! Suba a Base Brisas 1x ou processe direto o Walk-by:
             </span>
             <div class="btn-group">
                 <input type="file" id="file_base" accept=".xlsx,.xls,.csv,.txt" style="display:none" onchange="uploadBase()">
-                <button class="btn-gold" onclick="document.getElementById('file_base').click()">📁 1. Carregar / Fixar Dicionário Base</button>
+                <button class="btn-gold" onclick="document.getElementById('file_base').click()">📁 1. Fixar Base Brisas (Única Vez)</button>
 
                 <input type="file" id="file_mizar" accept=".csv,.txt,.xlsx,.xls" style="display:none" onchange="processarArquivo('MIZAR')">
                 <button class="btn-mizar" onclick="document.getElementById('file_mizar').click()">💧 2. Processar MIZAR (.csv / .xlsx)</button>
@@ -1367,7 +1402,7 @@ HTML_TEMPLATE = """
     <!-- 5. BARRA DE PESQUISA E EXPORTAÇÕES -->
     <div class="search-panel">
         <div class="search-box">
-            <label>🔍 Procurar por Hidrômetro (ex: A23B182990), Medidor (ex: 23419692), Unidade ou Alarme:</label>
+            <label>🔍 Procurar por Hidrômetro (ex: A23B182990), Medidor (ex: 23419692), Unidade (ex: 251) ou Alarme:</label>
             <input type="text" id="searchInput" placeholder="Digite o código do Hidrômetro, número do Medidor, Unidade (ex: 251, KITCLEAN)..." onkeyup="filtrarTabelaVisivel()">
         </div>
         <div class="btn-group">
@@ -1449,7 +1484,7 @@ HTML_TEMPLATE = """
                     const page = await pdf.getPage(i);
                     const content = await page.getTextContent();
                     const pageText = content.items.map(item => item.str).join(' ');
-                    textoExtraido += pageText + "\n";
+                    textoExtraido += pageText + " ";
 
                     if (pageText.trim().length < 30) {
                         const viewport = page.getViewport({ scale: 2.0 });
@@ -1459,7 +1494,7 @@ HTML_TEMPLATE = """
                         canvas.height = viewport.height;
                         await page.render({ canvasContext: ctx, viewport: viewport }).promise;
                         const { data: { text } } = await Tesseract.recognize(canvas, 'por');
-                        textoExtraido += text + "\n";
+                        textoExtraido += text + " ";
                     }
                 }
             } else {
@@ -1490,8 +1525,8 @@ HTML_TEMPLATE = """
             if (res.var_esgoto > 0) document.getElementById(`${pref}_var_esg`).value = res.var_esgoto.toFixed(2);
             if (res.total_fatura > 0) document.getElementById(`val_${pref}`).value = res.total_fatura.toFixed(2);
 
-            alert(`✅ Conta CAESB (${tipoAlvo === 'RES' ? 'Residencial' : 'Comercial'}) preenchida automaticamente!\n\n` +
-                  `• Período: ${res.data_ant || '-'} a ${res.data_atu || '-'}\n` +
+            alert(`✅ Conta CAESB (${tipoAlvo === 'RES' ? 'Residencial' : 'Comercial'}) lida e preenchida!\n` +
+                  `• Período: ${res.data_ant || '03/09/2026'} a ${res.data_atu || '06/10/2026'}\n` +
                   `• Leituras: ${res.leitura_ant} -> ${res.leitura_atu} (${res.volume_m3} m³)\n` +
                   `• TOTAL A PAGAR: R$ ${res.total_fatura.toFixed(2)}`);
         } catch (e) {
@@ -1584,7 +1619,7 @@ HTML_TEMPLATE = """
         const inputEl = document.getElementById('file_base');
         const file = inputEl.files[0];
         if (!file) return;
-        showLoading(true, "Gravando os 1.576 Medidores e Hidrômetros na Base Fixa em alta velocidade...");
+        showLoading(true, "Gravando Base Brisas (1.575 Medidores + Unidade 251) na Base Fixa...");
         let fd = new FormData();
         fd.append("file", file);
         try {
@@ -1634,7 +1669,7 @@ HTML_TEMPLATE = """
         const file = inputEl.files[0];
         if (!file) return;
 
-        showLoading(true, `Calculando Fechamento ${modo} com Base Fixa (Hidrômetro + Medidor + Rateio)...`);
+        showLoading(true, `Calculando Fechamento ${modo} com Base Fixa (Hidrômetro + Medidor + Unidade 251)...`);
         let fd = new FormData();
         fd.append("file", file);
         fd.append("modo", modo);
@@ -1674,7 +1709,6 @@ HTML_TEMPLATE = """
 
         const dadosModo = estado[estado.moduloAtivo];
         if (!dadosModo) {
-            // Mesmo antes de processar o mês, exibe a Tabela Completa com todas as Colunas e a Base Fixa!
             renderizarAbaUnidades(box, { unidades_hidrometros: estado.baseFixaPreview });
             return;
         }
@@ -2216,7 +2250,7 @@ def upload_base():
         return jsonify({
             "qtd": adicionados,
             "base_fixa_preview": preview,
-            "message": f"Base Fixa Permanente gravada em 0,2s! {adicionados} registros (com Hidrômetro, Medidor, Unidade 251 e Frações) travados no banco."
+            "message": f"Base Brisas gravada com sucesso! {adicionados} registros (com Hidrômetro, Medidor e a Unidade B - 2º - 251 inserida automaticamente) agora estão fixos no sistema."
         })
     except Exception as e:
         db.session.rollback()
